@@ -1,200 +1,211 @@
-const crypto = require("crypto");
+/**
+ * coco-passport-proxy — single-file Vercel serverless function
+ * - Health: GET /
+ * - Resolve: GET /resolve?stay_id=...
+ * - Upload binary: POST /upload?stay_id=...&filename=...
+ * - Upload from URL: POST /upload-url { stay_id, url, filename? }
+ * - Insert: POST /insert[?via=table] { rows: [...] }
+ * - Export: GET /export?stay_id=...
+ * - Status: GET /status?stay_id=...
+ * - Recent: GET /recent?limit=10
+ */
+const crypto = require('crypto');
 
-const parseBody = (req) =>
-  new Promise((resolve, reject) => {
-    let data = "";
-    req.on("data", (c) => (data += c));
-    req.on("end", () => {
-      try {
-        resolve(data ? JSON.parse(data) : {});
-      } catch (e) {
-        reject(e);
-      }
+const parseBody = (req) => new Promise((resolve, reject) => {
+  try {
+    let data = '';
+    req.on('data', c => data += c);
+    req.on('end', () => {
+      if (!data) return resolve({});
+      try { resolve(JSON.parse(data)); }
+      catch (e) { return reject(e); }
     });
-    req.on("error", reject);
-  });
+    req.on('error', reject);
+  } catch (e) { reject(e); }
+});
 
+// ---------- Config ----------
+const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } = process.env;
+
+const baseHeaders = {
+  apikey: SUPABASE_SERVICE_ROLE_KEY,
+  Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+  'Content-Type': 'application/json',
+  'Accept-Profile': 'public',
+  'Content-Profile': 'public'
+};
+
+// Canonical room ordering (A*, B*, then named houses)
+const ROOM_ORDER = [
+  "A3","A4","A5","A6","A7","A8","A9",
+  "B6","B7","B8","B9",
+  "Double House","Jungle House","Beach House","New House"
+];
+
+// ---------- Helpers ----------
+const cap1 = s => s ? (s[0].toUpperCase() + s.slice(1).toLowerCase()) : s;
+
+/**
+ * normalizeStayIdFreeform
+ * Accepts messy input like:
+ *   "b8, a9   DUPÔNT" → rooms ["A9","B8"], last "Dupônt" → stay_id "A9_B8_Dupônt"
+ *   "double house teulon" → rooms ["Double House"], last "Teulon" → "Double_House_Teulon"
+ *   "a5 double house miller" → rooms ["A5","Double House"] → "A5_Double_House_Miller"
+ */
+function normalizeStayIdFreeform(rawInput) {
+  const raw = String(rawInput || '').trim();
+  if (!raw) {
+    return {
+      input: '',
+      rooms_in: '',
+      last_in: '',
+      rooms: [],
+      last_name_canonical: '',
+      stay_id: ''
+    };
+  }
+
+  // Tokenize: turn commas/underscores into spaces, collapse, strip stray punctuation on edges
+  const cleaned = raw
+    .replace(/[_,-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const TOKENS = cleaned.split(' ').filter(Boolean);
+  const used = new Array(TOKENS.length).fill(false);
+
+  const twoWordRooms = ["Double House","Jungle House","Beach House","New House"];
+  const singleWordRooms = ["A3","A4","A5","A6","A7","A8","A9","B6","B7","B8","B9"];
+
+  let rooms = [];
+
+  // 1) Match 2-word rooms (case-insensitive)
+  for (let i = 0; i < TOKENS.length - 1; i++) {
+    if (used[i] || used[i+1]) continue;
+    const cand = `${TOKENS[i]} ${TOKENS[i+1]}`.toLowerCase();
+    const hit = twoWordRooms.find(r => r.toLowerCase() === cand);
+    if (hit) {
+      rooms.push(hit);
+      used[i] = used[i+1] = true;
+    }
+  }
+
+  // 2) Match single-word rooms and A*/B* codes irrespective of case
+  for (let i = 0; i < TOKENS.length; i++) {
+    if (used[i]) continue;
+    const t = TOKENS[i].toUpperCase();
+    if (singleWordRooms.includes(t)) {
+      rooms.push(t);
+      used[i] = true;
+      continue;
+    }
+    // Also accept A5/a5/B8/b8 patterns
+    if (/^[AB]\d+$/.test(t) && ROOM_ORDER.includes(t)) {
+      rooms.push(t);
+      used[i] = true;
+    }
+  }
+
+  // 3) Remaining tokens are last name parts; TitleCase each and glue (no spaces/hyphens)
+  const lastParts = TOKENS.filter((_, idx) => !used[idx]);
+  let lastNameCanonical = lastParts.map(cap1).join('').replace(/[\s-]+/g, '');
+
+  // 4) De-dup and sort rooms according to ROOM_ORDER
+  rooms = Array.from(new Set(rooms));
+  rooms.sort((a,b) => ROOM_ORDER.indexOf(a) - ROOM_ORDER.indexOf(b));
+
+  // 5) Build stay_id; underscore multi-word rooms
+  const stay_id = [
+    ...rooms.map(r => r.replace(/ /g, '_')),
+    lastNameCanonical
+  ].filter(Boolean).join('_');
+
+  return {
+    input: raw,
+    rooms_in: rooms.join(', '),
+    last_in: lastParts.join(' '),
+    rooms,
+    last_name_canonical: lastNameCanonical,
+    stay_id
+  };
+}
+
+// ---------- Handler ----------
 module.exports = async (req, res) => {
   // CORS
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, apikey, Accept-Profile, Content-Profile");
-  if (req.method === "OPTIONS") {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, apikey, Accept-Profile, Content-Profile');
+
+  if (req.method === 'OPTIONS') {
     res.status(200).end();
     return;
   }
 
-  // URL + normalize trailing slash
+  // Parse URL and normalize trailing slash
   let url;
+  try { url = new URL(req.url, 'https://x'); }
+  catch { res.status(400).send('Bad URL'); return; }
+  url.pathname = url.pathname.replace(/\/+$/, '') || '/';
+
   try {
-    url = new URL(req.url, "http://local");
-  } catch (e) {
-    res.status(400).send("Bad URL");
-    return;
-  }
-  url.pathname = url.pathname.replace(/\/+$/, "") || "/";
-
-  // Health
-  if (req.method === "GET" && url.pathname === "/") {
-    res.status(200).send("OK: coco-passport-proxy");
-    return;
-  }
-
-  const SUPABASE_URL = process.env.SUPABASE_URL;
-  const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-    res.status(500).json({ ok: false, error: "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY" });
-    return;
-  }
-
-  const baseHeaders = {
-    apikey: SUPABASE_SERVICE_ROLE_KEY,
-    Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-    "Content-Type": "application/json",
-    "Accept-Profile": "public",
-    "Content-Profile": "public",
-  };
-
-  // ---------- helpers ----------
-  const cap1 = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1).toLowerCase() : s);
-
-  // Robust normalizer for rooms + last name -> canonical stay_id
-  function normalizeStayIdFreeform(raw) {
-    if (!raw) {
-      return {
-        input: "",
-        rooms_in: "",
-        last_in: "",
-        rooms: [],
-        last_name_canonical: "",
-        stay_id: "",
-      };
+    // Health
+    if (req.method === 'GET' && url.pathname === '/') {
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.status(200).send('OK: coco-passport-proxy');
+      return;
     }
 
-    // Pre-clean: underscores -> space, strip common punctuation to spaces, collapse spaces
-    let cleaned = String(raw)
-      .replace(/_/g, " ")
-      .replace(/[,\.;:|\\\/]+/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-
-    const ROOM_ORDER = ["A3","A4","A5","A6","A7","A8","A9","B6","B7","B8","B9"];
-    const TWO_WORD_ROOMS = ["double house","jungle house","beach house","new house"];
-
-    const parts = cleaned.split(/\s+/).filter(Boolean);
-    const used = new Array(parts.length).fill(false);
-    let rooms = [];
-
-    // First pass: two-word rooms (case-insensitive)
-    for (let i = 0; i < parts.length - 1; i++) {
-      if (used[i] || used[i + 1]) continue;
-      const two = (parts[i] + " " + parts[i + 1]).toLowerCase();
-      if (TWO_WORD_ROOMS.includes(two)) {
-        rooms.push(two.split(" ").map(cap1).join(" "));
-        used[i] = true;
-        used[i + 1] = true;
-        i++;
-      }
+    // ---------- /resolve ----------
+    if (req.method === 'GET' && url.pathname === '/resolve') {
+      const q = url.searchParams.get('stay_id') || '';
+      const out = normalizeStayIdFreeform(q);
+      res.status(200).json(out);
+      return;
     }
 
-    // Second pass: single-token rooms like A3..A9, B6..B9
-    for (let i = 0; i < parts.length; i++) {
-      if (used[i]) continue;
-      const t = parts[i].toLowerCase();
-      if (/^[ab][0-9]+$/.test(t)) {
-        const canon = t.toUpperCase();
-        if (ROOM_ORDER.includes(canon)) {
-          rooms.push(canon);
-          used[i] = true;
-        }
-      }
-    }
+    // ---------- /upload (binary) ----------
+    if (req.method === 'POST' && url.pathname === '/upload') {
+      const stay_id = url.searchParams.get('stay_id');
+      const filename = (url.searchParams.get('filename') || `${crypto.randomUUID()}.jpg`).replace(/[^A-Za-z0-9._-]/g, '_');
+      if (!stay_id) { res.status(400).json({ ok: false, error: 'stay_id required' }); return; }
 
-    // Remaining tokens become last name parts
-    const lastParts = parts.filter((_, i) => !used[i]);
-
-    // TitleCase each part, then glue (remove spaces/hyphens)
-    let lastNameCanonical = lastParts.map(cap1).join("");
-    lastNameCanonical = lastNameCanonical.replace(/[\s-]+/g, "");
-
-    // De-dup rooms and sort in canonical order
-    rooms = Array.from(new Set(rooms));
-    rooms.sort((a, b) => ROOM_ORDER.indexOf(a) - ROOM_ORDER.indexOf(b));
-
-    const stay_id = [...rooms, lastNameCanonical].filter(Boolean).join("_");
-
-    return {
-      input: String(raw),
-      rooms_in: rooms.join(", "),
-      last_in: lastParts.join(" "),
-      rooms,
-      last_name_canonical: lastNameCanonical,
-      stay_id,
-    };
-  }
-
-  // ---------- /resolve ----------
-  if (req.method === "GET" && url.pathname === "/resolve") {
-    try {
-      const raw = url.searchParams.get("stay_id") || "";
-      const result = normalizeStayIdFreeform(raw);
-      res.status(200).json(result);
-    } catch (e) {
-      res.status(500).json({ ok: false, error: e.message || "resolve failed" });
-    }
-    return;
-  }
-
-  // ---------- /upload (binary) ----------
-  if (req.method === "POST" && url.pathname === "/upload") {
-    try {
-      const stay_id = url.searchParams.get("stay_id");
-      const filename = (url.searchParams.get("filename") || `${crypto.randomUUID()}.jpg`).replace(/[^A-Za-z0-9._-]/g, "_");
-      if (!stay_id) {
-        res.status(400).json({ ok: false, error: "stay_id required" });
-        return;
-      }
-      const objectPath = `passports/${stay_id}/${filename}`;
-
-      // read raw body
+      // Slurp body bytes
       const chunks = [];
-      req.on("data", (c) => chunks.push(c));
-      req.on("end", async () => {
-        const buf = Buffer.concat(chunks);
-
-        const put = await fetch(`${SUPABASE_URL}/storage/v1/object/${encodeURIComponent(objectPath)}`, {
-          method: "POST",
-          headers: {
-            apikey: SUPABASE_SERVICE_ROLE_KEY,
-            Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-            "Content-Type": "application/octet-stream",
-            "x-upsert": "true",
-          },
-          body: buf,
-        });
-        if (!put.ok) {
-          const t = await put.text();
-          res.status(put.status).json({ ok: false, error: "storage upload failed", body: t });
-          return;
-        }
-        res.status(200).json({ ok: true, object_path: objectPath });
+      await new Promise((resolve, reject) => {
+        req.on('data', c => chunks.push(c));
+        req.on('end', resolve);
+        req.on('error', reject);
       });
-    } catch (e) {
-      res.status(500).json({ ok: false, error: e.message || "upload error" });
-    }
-    return;
-  }
+      const buf = Buffer.concat(chunks);
 
-  // ---------- /upload-url (server fetch) ----------
-  if (req.method === "POST" && url.pathname === "/upload-url") {
-    try {
-      const { stay_id, url: imgUrl, filename } = await parseBody(req);
-      if (!stay_id || !imgUrl) {
-        res.status(400).json({ ok: false, error: "stay_id and url required" });
+      const objectPath = `passports/${stay_id}/${filename}`;
+      const put = await fetch(`${SUPABASE_URL}/storage/v1/object/${encodeURIComponent(objectPath)}`, {
+        method: 'POST',
+        headers: {
+          apikey: SUPABASE_SERVICE_ROLE_KEY,
+          Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+          'Content-Type': 'application/octet-stream',
+          'x-upsert': 'true'
+        },
+        body: buf
+      });
+      if (!put.ok) {
+        const t = await put.text();
+        res.status(put.status).json({ ok: false, error: 'storage upload failed', body: t });
         return;
       }
-      const safeName = (filename || `${crypto.randomUUID()}.jpg`).replace(/[^A-Za-z0-9._-]/g, "_");
-      const objectPath = `passports/${stay_id}/${safeName}`;
+      res.status(200).json({ ok: true, object_path: objectPath });
+      return;
+    }
+
+    // ---------- /upload-url (fetch image from URL then store) ----------
+    if (req.method === 'POST' && url.pathname === '/upload-url') {
+      const body = await parseBody(req);
+      const stay_id = body.stay_id;
+      const imgUrl = body.url;
+      const filename = (body.filename || `${crypto.randomUUID()}.jpg`).replace(/[^A-Za-z0-9._-]/g, '_');
+      if (!stay_id || !imgUrl) { res.status(400).json({ ok: false, error: 'stay_id and url required' }); return; }
 
       const fetchRes = await fetch(imgUrl);
       if (!fetchRes.ok) {
@@ -204,189 +215,153 @@ module.exports = async (req, res) => {
       }
       const buf = Buffer.from(await fetchRes.arrayBuffer());
 
+      const objectPath = `passports/${stay_id}/${filename}`;
       const put = await fetch(`${SUPABASE_URL}/storage/v1/object/${encodeURIComponent(objectPath)}`, {
-        method: "POST",
+        method: 'POST',
         headers: {
           apikey: SUPABASE_SERVICE_ROLE_KEY,
           Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-          "Content-Type": "application/octet-stream",
-          "x-upsert": "true",
+          'Content-Type': 'application/octet-stream',
+          'x-upsert': 'true'
         },
-        body: buf,
+        body: buf
       });
       if (!put.ok) {
         const t = await put.text();
-        res.status(put.status).json({ ok: false, error: "storage upload failed", body: t });
+        res.status(put.status).json({ ok: false, error: 'storage upload failed', body: t });
         return;
       }
       res.status(200).json({ ok: true, object_path: objectPath });
-    } catch (e) {
-      res.status(500).json({ ok: false, error: e.message || "upload-url error" });
+      return;
     }
-    return;
-  }
 
-  // ---------- /insert ----------
-  if (req.method === "POST" && url.pathname === "/insert") {
-    try {
-      const viaTable = url.searchParams.get("via") === "table";
+    // ---------- /insert ----------
+    if (req.method === 'POST' && url.pathname === '/insert') {
+      const via = (url.searchParams.get('via') || '').toLowerCase(); // '' or 'table'
       const body = await parseBody(req);
-
       if (!body || !Array.isArray(body.rows)) {
-        res.status(400).json({ ok: false, error: "rows (array) required" });
+        res.status(400).json({ ok: false, error: 'rows (array) required' });
         return;
       }
 
-      // try RPC first unless forced to table
-      if (!viaTable) {
+      // Prefer RPC
+      if (via !== 'table') {
         const rpc = await fetch(`${SUPABASE_URL}/rest/v1/rpc/insert_incoming_guests`, {
-          method: "POST",
+          method: 'POST',
           headers: baseHeaders,
-          body: JSON.stringify(body),
+          body: JSON.stringify(body)
         });
         if (rpc.ok) {
-          const text = await rpc.text();
-          res.status(200).send(text || "[]");
+          const txt = await rpc.text();
+          // Supabase RPC returns '' or '[]'
+          res.status(200).send(txt || '[]');
           return;
         }
-        // fall through to table if RPC failed
+        // Fall back to table insert if RPC failed
       }
 
-      // fallback: direct table insert (bulk)
-      const tbl = await fetch(`${SUPABASE_URL}/rest/v1/incoming_guests`, {
-        method: "POST",
-        headers: { ...baseHeaders, Prefer: "return=minimal" },
-        body: JSON.stringify(body.rows || []),
-      });
-
-      if (tbl.ok) {
-        // we’ll check duplicates one-by-one to report a mini summary
-        let inserted = 0;
-        const skipped = [];
-        for (const r of body.rows) {
-          const single = await fetch(`${SUPABASE_URL}/rest/v1/incoming_guests`, {
-            method: "POST",
-            headers: { ...baseHeaders, Prefer: "resolution=merge-duplicates" },
-            body: JSON.stringify([r]),
-          });
-          if (single.ok) {
-            inserted += 1;
+      // Table fallback — insert one-by-one to report duplicates cleanly
+      let inserted = 0;
+      const skipped = [];
+      for (const row of body.rows) {
+        const tbl = await fetch(`${SUPABASE_URL}/rest/v1/incoming_guests`, {
+          method: 'POST',
+          headers: { ...baseHeaders, Prefer: 'return=minimal' },
+          body: JSON.stringify([row])
+        });
+        if (tbl.ok) {
+          inserted += 1;
+        } else {
+          const errText = await tbl.text();
+          // detect duplicate by 23505
+          if (/23505/.test(errText)) {
+            skipped.push({ passport_number: row.passport_number, reason: 'duplicate', raw: errText });
           } else {
-            const raw = await single.text();
-            // If duplicate key, report it
-            skipped.push({
-              passport_number: r.passport_number,
-              reason: raw.includes("duplicate") || raw.includes("already exists") ? "duplicate" : "error",
-              raw,
-            });
+            return res.status(tbl.status).json({ ok: false, status: tbl.status, error: errText, via: 'table' });
           }
         }
-        res.status(200).json({ ok: true, via: "table", inserted, skipped });
-        return;
-      } else {
-        let err = await tbl.text();
-        res.status(404).json({ ok: false, status: tbl.status, error: err ? JSON.parseSafe(err) ?? err : {}, via: "table" });
-        return;
       }
-    } catch (e) {
-      res.status(500).json({ ok: false, error: e.message || "insert error" });
+      res.status(200).json({ ok: true, via: 'table', inserted, skipped });
+      return;
     }
-    return;
-  }
 
-  // ---------- /export (tab-delimited with header) ----------
-  if (req.method === "GET" && url.pathname === "/export") {
-    try {
-      const stay_id = url.searchParams.get("stay_id");
-      const rooms = url.searchParams.get("rooms");
-      const last = url.searchParams.get("last");
+    // ---------- /export ----------
+    if (req.method === 'GET' && url.pathname === '/export') {
+      const stay_id = url.searchParams.get('stay_id');
+      const rooms = url.searchParams.get('rooms');
+      const last = url.searchParams.get('last');
 
-      let resolved = stay_id;
-      if (!resolved && (rooms || last)) {
-        const guess = normalizeStayIdFreeform(`${rooms || ""} ${last || ""}`);
-        resolved = guess.stay_id;
+      let q = `${SUPABASE_URL}/rest/v1/incoming_guests_export_view?order=created_at.asc&select=${encodeURIComponent('"First Name","Middle Name","Last Name","Gender","Passport Number","Nationality","Birthday"')}`;
+      if (stay_id) {
+        q += `&stay_id=eq.${encodeURIComponent(stay_id)}`;
+      } else if (rooms && last) {
+        const norm = normalizeStayIdFreeform(`${rooms} ${last}`).stay_id;
+        if (!norm) { res.status(400).send('Bad rooms/last'); return; }
+        q += `&stay_id=eq.${encodeURIComponent(norm)}`;
+      } else {
+        res.status(400).send('stay_id or (rooms+last) required'); return;
       }
 
-      if (!resolved) {
-        res.status(400).send("First Name\tMiddle Name\tLast Name\tGender\tPassport Number\tNationality\tBirthday");
-        return;
-      }
-
-      const q = new URLSearchParams({
-        stay_id: `eq.${resolved}`,
-        order: "created_at.asc",
-        select: "\"First Name\",\"Middle Name\",\"Last Name\",\"Gender\",\"Passport Number\",\"Nationality\",\"Birthday\"",
-      });
-
-      const r = await fetch(`${SUPABASE_URL}/rest/v1/incoming_guests_export_view?${q}`, {
-        headers: { ...baseHeaders, "Content-Type": "text/plain" },
-      });
-      if (!r.ok) {
-        const t = await r.text();
-        res.status(r.status).send(t || "Export error");
-        return;
-      }
+      const r = await fetch(q, { headers: { ...baseHeaders, 'Accept': 'application/json' } });
+      if (!r.ok) { const t = await r.text(); res.status(r.status).send(t || 'export error'); return; }
       const rows = await r.json();
 
-      const header = "First Name\tMiddle Name\tLast Name\tGender\tPassport Number\tNationality\tBirthday";
-      const body = rows
-        .map((x) =>
-          [
-            x["First Name"] ?? "",
-            x["Middle Name"] ?? "",
-            x["Last Name"] ?? "",
-            x["Gender"] ?? "",
-            x["Passport Number"] ?? "",
-            x["Nationality"] ?? "",
-            x["Birthday"] ?? "",
-          ].join("\t")
-        )
-        .join("\n");
-
-      res.status(200).type("text/plain").send(body ? `${header}\n${body}` : header);
-    } catch (e) {
-      res.status(500).type("text/plain").send(e.message || "export error");
+      // Build tab-delimited text
+      const header = ['First Name','Middle Name','Last Name','Gender','Passport Number','Nationality','Birthday'].join('\t');
+      const lines = [header];
+      for (const rec of rows) {
+        lines.push([
+          rec['First Name'] ?? '',
+          rec['Middle Name'] ?? '',
+          rec['Last Name'] ?? '',
+          rec['Gender'] ?? '',
+          rec['Passport Number'] ?? '',
+          rec['Nationality'] ?? '',
+          rec['Birthday'] ?? ''
+        ].join('\t'));
+      }
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.status(200).send(lines.join('\n'));
+      return;
     }
-    return;
-  }
 
-  // ---------- /status (plain line) ----------
-  if (req.method === "GET" && url.pathname === "/status") {
-    try {
-      const stay_id = url.searchParams.get("stay_id");
-      if (!stay_id) {
-        res.status(200).type("text/plain").send("0 of ? passports received 📸");
-        return;
+    // ---------- /status ----------
+    if (req.method === 'GET' && url.pathname === '/status') {
+      const stay_id = url.searchParams.get('stay_id');
+      if (!stay_id) { res.status(400).send('stay_id required'); return; }
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/v_passport_status_by_stay?stay_id=eq.${encodeURIComponent(stay_id)}&limit=1`, {
+        headers: baseHeaders
+      });
+      if (!r.ok) { const t = await r.text(); res.status(r.status).send(t || 'status error'); return; }
+      const rows = await r.json();
+      const row = rows[0];
+      let line = '0 of ? passports received 📸';
+      if (row && typeof row.passports_received !== 'undefined' && typeof row.total_guests !== 'undefined') {
+        if (row.passports_received >= row.total_guests && row.total_guests > 0) {
+          line = '✅ All received';
+        } else {
+          line = `${row.passports_received} of ${row.total_guests} passports received 📸`;
+        }
       }
-      const q = new URLSearchParams({ stay_id: `eq.${stay_id}`, limit: "1" });
-      const r = await fetch(`${SUPABASE_URL}/rest/v1/v_passport_status_by_stay?${q}`, { headers: baseHeaders });
-      if (!r.ok) {
-        const t = await r.text();
-        res.status(r.status).type("text/plain").send(t || "status error");
-        return;
-      }
-      const [row] = await r.json();
-      if (!row) {
-        res.status(200).type("text/plain").send("0 of ? passports received 📸");
-        return;
-      }
-      const { passports_received, total_guests } = row;
-      const line =
-        total_guests && passports_received >= total_guests
-          ? "✅ All received"
-          : `${passports_received || 0} of ${total_guests || "?"} passports received 📸`;
-      res.status(200).type("text/plain").send(line);
-    } catch (e) {
-      res.status(500).type("text/plain").send(e.message || "status error");
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.status(200).send(line);
+      return;
     }
-    return;
+
+    // ---------- /recent ----------
+    if (req.method === 'GET' && url.pathname === '/recent') {
+      const limit = Math.max(1, Math.min(50, parseInt(url.searchParams.get('limit') || '10', 10)));
+      const q = `${SUPABASE_URL}/rest/v1/incoming_guests_recent?select=stay_id,first_name,last_name,passport_number,created_at&order=created_at.desc&limit=${limit}`;
+      const r = await fetch(q, { headers: baseHeaders });
+      if (!r.ok) { const t = await r.text(); res.status(r.status).send(t || 'recent error'); return; }
+      const rows = await r.json();
+      res.status(200).json(rows);
+      return;
+    }
+
+    // Fallback
+    res.status(404).json({ ok: false, error: 'Not Found' });
+  } catch (e) {
+    res.status(500).send(e.message || 'server error');
   }
-
-  // Fallback
-  res.status(404).json({ ok: false, error: "Not found" });
-};
-
-// little helper to safely JSON.parse in error paths
-JSON.parseSafe = (s) => {
-  try { return JSON.parse(s); } catch { return null; }
 };

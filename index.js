@@ -1,77 +1,73 @@
 const crypto = require('crypto');
 
+// --- tiny helpers ------------------------------------------------------------
 const parseBody = (req) => new Promise((resolve, reject) => {
-  let data = '';
-  req.on('data', c => data += c);
+  let data = ''; req.on('data', c => data += c);
   req.on('end', () => { try { resolve(data ? JSON.parse(data) : {}); } catch (e) { reject(e); } });
   req.on('error', reject);
 });
-
-function pad(n){return n<10?'0'+n:''+n}
-function fmtDate(d, fmt){
-  return fmt.replace('%m', pad(d.getMonth()+1)).replace('%d', pad(d.getDate())).replace('%Y', d.getFullYear());
-}
-function resolveTemplateDates(urlStr){
-  try{
-    const now = new Date();
-    const tmr = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()+1));
-    return urlStr
-      .replace(/{start:%([^}]+)}/g, (_,fmt)=>fmtDate(tmr, '%'+fmt))
-      .replace(/{end:%([^}]+)}/g,   (_,fmt)=>fmtDate(tmr, '%'+fmt));
-  }catch(e){ return urlStr }
-}
-
-async function fetchJson(u, opts={}) {
-  const r = await fetch(u, opts);
+async function fetchJson(url, opts={}) {
+  const r = await fetch(url, opts);
   const text = await r.text();
   try { return { ok: r.ok, status: r.status, json: JSON.parse(text), text }; }
   catch { return { ok: r.ok, status: r.status, json: null, text }; }
 }
+function sendCORS(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, apikey, Accept-Profile, Content-Profile');
+  if (req.method === 'OPTIONS') { res.statusCode = 204; res.end(); return true; }
+  return false;
+}
+function pad(n){return n<10?'0'+n:String(n)}
+function fmtDate(d, fmt){ return fmt.replace('%m', pad(d.getMonth()+1)).replace('%d', pad(d.getDate())).replace('%Y', d.getFullYear()) }
+function resolveTemplateDates(urlStr){
+  try{
+    const now = new Date();
+    const tmr = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()+1)); // “tomorrow” UTC
+    return urlStr
+      .replace(/{start:%([^}]+)}/g, (_,fmt)=>fmtDate(tmr, '%'+fmt))
+      .replace(/{end:%([^}]+)}/g,   (_,fmt)=>fmtDate(tmr, '%'+fmt));
+  }catch{ return urlStr }
+}
 
-const ROOM_ORDER = [
-  "A3","A4","A5","A6","A7","A8","A9",
-  "B6","B7","B8","B9",
-  "Double House","Jungle House","Beach House","New House"
-];
-
-function cap1(s){ return s ? s.charAt(0).toUpperCase() + s.slice(1).toLowerCase() : s; }
-
-function normalizeStayIdFreeform(raw) {
+// Resolver bits
+const ROOM_ORDER = ["A3","A4","A5","A6","A7","A8","A9","B6","B7","B8","B9","Double House","Jungle House","Beach House","New House"];
+const TWO_WORD_ROOMS = ["Double House","Jungle House","Beach House","New House"];
+const ONE_WORD_ROOMS = ["A3","A4","A5","A6","A7","A8","A9","B6","B7","B8","B9"];
+function cap1(s){ if(!s) return s; return s[0].toUpperCase()+s.slice(1).toLowerCase(); }
+function normalizeStayIdFreeform(raw){
   if (!raw) return { input:'', rooms_in:'', last_in:'', rooms:[], last_name_canonical:'', stay_id:'' };
-  let s = String(raw).trim();
-  s = s.replace(/[,+]/g,' ').replace(/\s+/g,' ').trim();
-
-  const parts = s.split(/\s+/);
+  const cleaned = String(raw).trim().replace(/[,\.;:]+/g,' ');
+  const parts = cleaned.split(/[\s_]+/).filter(Boolean);
   const used = new Array(parts.length).fill(false);
   let rooms = [];
 
-  // 1) two-word rooms
+  // two-word rooms
   for (let i=0;i<parts.length-1;i++){
     if (used[i]||used[i+1]) continue;
     const two = (parts[i]+' '+parts[i+1]).toLowerCase();
-    const hit = ROOM_ORDER.find(r=>r.toLowerCase()===two);
-    if (hit){ rooms.push(hit); used[i]=used[i+1]=true; i++; }
+    const match = TWO_WORD_ROOMS.find(r=>r.toLowerCase()===two);
+    if (match){ rooms.push(match); used[i]=used[i+1]=true; }
   }
-  // 2) single-word A*/B* codes
+  // one-word rooms and A/B numbers
   for (let i=0;i<parts.length;i++){
     if (used[i]) continue;
     const t = parts[i].toLowerCase();
-    if (/^[ab][0-9]+$/.test(t)) {
-      const canon = t.toUpperCase();
-      if (ROOM_ORDER.includes(canon)) { rooms.push(canon); used[i]=true; }
+    const one = ONE_WORD_ROOMS.find(r=>r.toLowerCase()===t);
+    if (one){ rooms.push(one); used[i]=true; continue; }
+    if (/^[ab][0-9]+$/.test(t)){
+      const canon=t.toUpperCase();
+      if (ROOM_ORDER.includes(canon)){ rooms.push(canon); used[i]=true; }
     }
   }
-  // 3) last name = remaining tokens
   const lastParts = parts.filter((_,i)=>!used[i]);
   let lastNameCanonical = lastParts.map(cap1).join('').replace(/[\s-]+/g,'');
-
-  // 4) dedupe + sort rooms by ROOM_ORDER
   rooms = Array.from(new Set(rooms));
   rooms.sort((a,b)=>ROOM_ORDER.indexOf(a)-ROOM_ORDER.indexOf(b));
-
   const stay_id = [...rooms, lastNameCanonical].filter(Boolean).join('_');
   return {
-    input: String(raw),
+    input:String(raw),
     rooms_in: rooms.join(', '),
     last_in: lastParts.join(' '),
     rooms,
@@ -81,21 +77,18 @@ function normalizeStayIdFreeform(raw) {
 }
 
 module.exports = async (req, res) => {
-  // Basic CORS
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, apikey, Accept-Profile, Content-Profile');
-  if (req.method === 'OPTIONS') { res.statusCode = 200; res.end(); return; }
+  // CORS
+  if (sendCORS(req,res)) return;
 
+  // URL + path normalize
   let url;
-  try {
-    url = new URL(req.url, 'http://x');
-  } catch {
-    res.status(400).json({ ok:false, error:'bad url' }); return;
-  }
-  url.pathname = url.pathname.replace(/\/+$/,'') || '/';
+  try { url = new URL(req.url, 'http://local'); } catch { res.statusCode=400; res.end('Bad URL'); return; }
+  url.pathname = (url.pathname.replace(/\/+$/,'') || '/');
 
-  const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } = process.env || {};
+  // Health
+  if (req.method==='GET' && url.pathname==='/') { res.setHeader('Content-Type','text/plain'); res.end('OK: coco-passport-proxy'); return; }
+
+  const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, TOKEET_FEED_URL } = process.env || {};
   const baseHeaders = {
     apikey: SUPABASE_SERVICE_ROLE_KEY,
     Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
@@ -104,218 +97,182 @@ module.exports = async (req, res) => {
     'Content-Profile': 'public'
   };
 
-  // --- Health ---------------------------------------------------------------
-  if (req.method === 'GET' && url.pathname === '/') {
-    res.status(200).send('OK: coco-passport-proxy'); return;
+  // --- /resolve ----------------------------------------------------------------
+  if (req.method==='GET' && url.pathname==='/resolve'){
+    const q = url.searchParams.get('stay_id') || '';
+    const out = normalizeStayIdFreeform(q);
+    res.setHeader('Content-Type','application/json'); res.end(JSON.stringify(out)); return;
   }
 
-  // --- Resolve stay label to canonical stay_id ------------------------------
-  if (req.method === 'GET' && url.pathname === '/resolve') {
-    const raw = url.searchParams.get('stay_id') || '';
-    const out = normalizeStayIdFreeform(raw);
-    res.status(200).json(out); return;
-  }
-
-  // --- Upload (binary) ------------------------------------------------------
-  if (req.method === 'POST' && url.pathname === '/upload') {
-    try {
-      const stay_id = url.searchParams.get('stay_id');
-      const filename = url.searchParams.get('filename') || (crypto.randomUUID()+'.jpg');
-      if (!stay_id) { res.status(400).json({ ok:false, error:'stay_id required' }); return; }
-
+  // --- /upload (binary) --------------------------------------------------------
+  if (req.method==='POST' && url.pathname==='/upload'){
+    try{
+      const stay_id = url.searchParams.get('stay_id'); const filename = (url.searchParams.get('filename')||`${crypto.randomUUID()}.jpg`).replace(/[^A-Za-z0-9._-]/g,'_');
+      if (!stay_id){ res.statusCode=400; res.end(JSON.stringify({ok:false,error:'stay_id required'})); return; }
       const objectPath = `passports/${stay_id}/${filename}`;
-      const chunks = [];
-      req.on('data', c=>chunks.push(c));
-      req.on('end', async ()=>{
-        const buf = Buffer.concat(chunks);
-        const put = await fetch(`${SUPABASE_URL}/storage/v1/object/${encodeURIComponent(objectPath)}`,{
-          method:'POST',
-          headers:{
-            apikey: SUPABASE_SERVICE_ROLE_KEY,
-            Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-            'Content-Type': 'application/octet-stream',
-            'x-upsert':'true'
-          },
-          body: buf
-        });
-        const t = await put.text();
-        if (!put.ok){ res.status(put.status).json({ ok:false, error:'storage upload failed', body:t }); return; }
-        res.status(200).json({ ok:true, object_path: objectPath });
-      });
-    } catch(e){
-      res.status(500).json({ ok:false, error: e.message || 'upload error' });
-    }
-    return;
-  }
-
-  // --- Upload from URL ------------------------------------------------------
-  if (req.method === 'POST' && url.pathname === '/upload-url') {
-    try {
-      const { stay_id, url: imgUrl, filename } = await parseBody(req).catch(()=>({}));
-      if (!stay_id || !imgUrl) { res.status(400).json({ ok:false, error:'stay_id and url required' }); return; }
-      const safe = (filename || crypto.randomUUID()+'.jpg').replace(/[^A-Za-z0-9._-]/g,'_');
-      const objectPath = `passports/${stay_id}/${safe}`;
-
-      const get = await fetch(imgUrl);
-      if (!get.ok){ const t=await get.text(); res.status(400).json({ ok:false, error:`fetch image failed: ${get.status}`, body:t }); return; }
-      const buf = Buffer.from(await get.arrayBuffer());
-
-      const put = await fetch(`${SUPABASE_URL}/storage/v1/object/${encodeURIComponent(objectPath)}`,{
+      const chunks=[]; for await (const c of req) chunks.push(c); const buf = Buffer.concat(chunks);
+      const put = await fetch(`${SUPABASE_URL}/storage/v1/object/${encodeURIComponent(objectPath)}`, {
         method:'POST',
-        headers:{
-          apikey: SUPABASE_SERVICE_ROLE_KEY,
-          Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-          'Content-Type': 'application/octet-stream',
-          'x-upsert':'true'
-        },
+        headers:{ apikey:SUPABASE_SERVICE_ROLE_KEY, Authorization:`Bearer ${SUPABASE_SERVICE_ROLE_KEY}`, 'Content-Type':'application/octet-stream', 'x-upsert':'true' },
         body: buf
       });
       const t = await put.text();
-      if (!put.ok){ res.status(put.status).json({ ok:false, error:'storage upload failed', body:t }); return; }
-      res.status(200).json({ ok:true, object_path: objectPath });
-      return;
-    } catch(e){
-      res.status(500).json({ ok:false, error: e.message || 'upload-url error' }); return;
-    }
+      if (!put.ok){ res.statusCode=put.status; res.end(JSON.stringify({ok:false,error:'storage upload failed', body:t})); return; }
+      res.setHeader('Content-Type','application/json'); res.end(JSON.stringify({ok:true, object_path:objectPath})); return;
+    }catch(e){ res.statusCode=500; res.end(JSON.stringify({ok:false,error:e.message||'upload error'})); return; }
   }
 
-  // --- Insert (RPC first, fallback to table) --------------------------------
-  if (req.method === 'POST' && url.pathname === '/insert') {
-    try {
-      const body = await parseBody(req).catch(()=>({}));
-      const viaTable = url.searchParams.get('via') === 'table';
-      if (!body || !Array.isArray(body.rows)) { res.status(400).json({ ok:false, error:'rows (array) required' }); return; }
-
-      if (!viaTable) {
-        // Try RPC
-        const rpc = await fetch(`${SUPABASE_URL}/rest/v1/rpc/insert_incoming_guests`, {
-          method:'POST', headers: baseHeaders, body: JSON.stringify(body)
-        });
-        if (rpc.ok) { const txt = await rpc.text(); res.status(200).send(txt || '[]'); return; }
-      }
-      // Fallback: direct table
-      const tbl = await fetch(`${SUPABASE_URL}/rest/v1/incoming_guests`, {
-        method:'POST',
-        headers:{ ...baseHeaders, Prefer:'return=representation' },
-        body: JSON.stringify(body.rows)
+  // --- /upload-url (server fetches from URL) -----------------------------------
+  if (req.method==='POST' && url.pathname==='/upload-url'){
+    try{
+      const { stay_id, url:imgUrl, filename } = await parseBody(req);
+      if (!stay_id || !imgUrl){ res.statusCode=400; res.end(JSON.stringify({ok:false,error:'stay_id and url required'})); return; }
+      const safeName=(filename||`${crypto.randomUUID()}.jpg`).replace(/[^A-Za-z0-9._-]/g,'_');
+      const objectPath = `passports/${stay_id}/${safeName}`;
+      const fr = await fetch(imgUrl); if (!fr.ok){ const tt = await fr.text(); res.statusCode=400; res.end(JSON.stringify({ok:false,error:`fetch image failed: ${fr.status}`, body:tt})); return; }
+      const buf = Buffer.from(await fr.arrayBuffer());
+      const put = await fetch(`${SUPABASE_URL}/storage/v1/object/${encodeURIComponent(objectPath)}`, {
+        method:'POST', headers:{ apikey:SUPABASE_SERVICE_ROLE_KEY, Authorization:`Bearer ${SUPABASE_SERVICE_ROLE_KEY}`, 'Content-Type':'application/octet-stream', 'x-upsert':'true' }, body:buf
       });
-      const txt = await tbl.text();
-      if (!tbl.ok){
-        let inserted=0, skipped=[], status=tbl.status;
-        try {
-          const rows = Array.isArray(body.rows) ? body.rows : [];
-          for (const r of rows){
-            const one = await fetch(`${SUPABASE_URL}/rest/v1/incoming_guests`, {
-              method:'POST',
-              headers:{ ...baseHeaders, Prefer:'return=representation' },
-              body: JSON.stringify([r])
-            });
-            const ot = await one.text();
-            if (one.ok) inserted++; else skipped.push({ passport_number:r.passport_number, reason:'duplicate', raw:ot });
-          }
-          res.status(200).json({ ok:true, via:'table', inserted, skipped });
-          return;
-        } catch {
-          res.status(status||500).json({ ok:false, status, error:txt }); return;
-        }
-      }
-      // On success, return array or ack
-      try { const j = JSON.parse(txt); res.status(200).json(j); }
-      catch { res.status(200).send(txt || '[]'); }
-      return;
-    } catch(e){
-      res.status(500).json({ ok:false, error: e.message || 'insert error' }); return;
+      const t = await put.text();
+      if (!put.ok){ res.statusCode=put.status; res.end(JSON.stringify({ok:false,error:'storage upload failed', body:t})); return; }
+      res.setHeader('Content-Type','application/json'); res.end(JSON.stringify({ok:true, object_path:objectPath})); return;
+    }catch(e){ res.statusCode=500; res.end(JSON.stringify({ok:false,error:e.message||'upload-url error'})); return; }
+  }
+
+  // --- /insert (RPC first, fallback table) ------------------------------------
+  if (req.method==='POST' && url.pathname==='/insert'){
+    const body = await parseBody(req).catch(()=>({}));
+    const rows = Array.isArray(body.rows)? body.rows : [];
+    if (!rows.length){ res.setHeader('Content-Type','application/json'); res.statusCode=400; res.end(JSON.stringify({ok:false,error:'rows (array) required'})); return; }
+
+    // RPC try
+    const rpc = await fetch(`${SUPABASE_URL}/rest/v1/rpc/insert_incoming_guests`, { method:'POST', headers: baseHeaders, body: JSON.stringify(body) });
+    if (rpc.ok){ const text = await rpc.text(); res.setHeader('Content-Type','application/json'); res.statusCode=200; res.end(text || '[]'); return; }
+
+    // fallback table insert
+    const tbl = await fetch(`${SUPABASE_URL}/rest/v1/incoming_guests`, {
+      method:'POST', headers:{ ...baseHeaders, Prefer:'return=representation' }, body: JSON.stringify(rows)
+    });
+    const txt = await tbl.text();
+    if (!tbl.ok){ res.statusCode=tbl.status; res.end(JSON.stringify({ok:false,status:tbl.status,error:txt,via:'table'})); return; }
+
+    // detect duplicates from PostgREST payload (if any)
+    let inserted=0, skipped=[];
+    try{
+      const js = JSON.parse(txt);
+      inserted = Array.isArray(js)? js.length : 0;
+    }catch{}
+    res.setHeader('Content-Type','application/json');
+    res.end(JSON.stringify({ ok:true, via:'table', inserted, skipped }));
+    return;
+  }
+
+  // --- /export (tab-delimited 7 cols, header) ---------------------------------
+  if (req.method==='GET' && url.pathname==='/export'){
+    const stay_id = url.searchParams.get('stay_id');
+    const rooms = url.searchParams.get('rooms');
+    const last = url.searchParams.get('last');
+    let effectiveStay = stay_id;
+    if (!effectiveStay && (rooms || last)){
+      const label = [rooms||'', last||''].join(' ').trim();
+      const r = normalizeStayIdFreeform(label);
+      effectiveStay = r.stay_id;
     }
-  }
-
-  // --- Export (tab-delimited 7 columns + header) ----------------------------
-  if (req.method === 'GET' && url.pathname === '/export') {
-    const stay_id = url.searchParams.get('stay_id');
-    let where = '';
-    if (stay_id) where = `stay_id=eq.${encodeURIComponent(stay_id)}`;
-    const u = `${SUPABASE_URL}/rest/v1/incoming_guests_export_view?${where}&order=created_at.asc&select=%22First%20Name%22,%22Middle%20Name%22,%22Last%20Name%22,%22Gender%22,%22Passport%20Number%22,%22Nationality%22,%22Birthday%22`;
-    const r = await fetch(u, { headers: { apikey: SUPABASE_SERVICE_ROLE_KEY, Authorization:`Bearer ${SUPABASE_SERVICE_ROLE_KEY}`, 'Accept-Profile':'public' }});
-    const j = await r.json().catch(()=>[]);
-    const header = ['First Name','Middle Name','Last Name','Gender','Passport Number','Nationality','Birthday'].join('\t');
-    const lines = j.map(row => [row['First Name'],row['Middle Name'],row['Last Name'],row['Gender'],row['Passport Number'],row['Nationality'],row['Birthday']].join('\t'));
     res.setHeader('Content-Type','text/plain; charset=utf-8');
-    res.status(200).send([header, ...lines].join('\n')); return;
+    if (!effectiveStay){ res.end('First Name\tMiddle Name\tLast Name\tGender\tPassport Number\tNationality\tBirthday'); return; }
+
+    const qs = new URLSearchParams({
+      'stay_id': `eq.${effectiveStay}`,
+      'order': 'created_at.asc',
+      'select': '"First Name","Middle Name","Last Name","Gender","Passport Number","Nationality","Birthday"'
+    }).toString();
+
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/incoming_guests_export_view?${qs}`, { headers: baseHeaders });
+    const txt = await r.text();
+    if (!r.ok){ res.statusCode=r.status; res.end('First Name\tMiddle Name\tLast Name\tGender\tPassport Number\tNationality\tBirthday'); return; }
+
+    let out = 'First Name\tMiddle Name\tLast Name\tGender\tPassport Number\tNationality\tBirthday';
+    try{
+      const arr = JSON.parse(txt);
+      for (const row of arr){
+        out += `\n${row["First Name"]||''}\t${row["Middle Name"]||''}\t${row["Last Name"]||''}\t${row["Gender"]||''}\t${row["Passport Number"]||''}\t${row["Nationality"]||''}\t${row["Birthday"]||''}`;
+      }
+    }catch{}
+    res.end(out); return;
   }
 
-  // --- Status (uses view v_passport_status_by_stay) --------------------------
-  if (req.method === 'GET' && url.pathname === '/status') {
+  // --- /status (one-line) -----------------------------------------------------
+  if (req.method==='GET' && url.pathname==='/status'){
     const stay_id = url.searchParams.get('stay_id');
-    const u = `${SUPABASE_URL}/rest/v1/v_passport_status_by_stay?stay_id=eq.${encodeURIComponent(stay_id)}`;
-    const r = await fetch(u, { headers:{ apikey: SUPABASE_SERVICE_ROLE_KEY, Authorization:`Bearer ${SUPABASE_SERVICE_ROLE_KEY}`, 'Accept-Profile':'public' }});
-    const j = await r.json().catch(()=>[]);
-    const status = Array.isArray(j) && j[0] && j[0].status ? j[0].status : '0 of ? passports received 📸';
     res.setHeader('Content-Type','text/plain; charset=utf-8');
-    res.status(200).send(status); return;
+    if (!stay_id){ res.end('0 of ? passports received 📸'); return; }
+    const qs = new URLSearchParams({ 'stay_id': `eq.${stay_id}` }).toString();
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/v_passport_status_by_stay?${qs}`, { headers: baseHeaders });
+    const txt = await r.text();
+    if (!r.ok){ res.statusCode=r.status; res.end('0 of ? passports received 📸'); return; }
+    try{ const arr = JSON.parse(txt); res.end(arr[0]?.status || '0 of ? passports received 📸'); }
+    catch{ res.end('0 of ? passports received 📸'); }
+    return;
   }
 
-  // --- Tokeet feed upsert (server pulls feed) --------------------------------
-  if (req.method === 'POST' && url.pathname === '/tokeet-upsert') {
-    try {
+  // --- /tokeet-upsert (pull feed URL, preseed) --------------------------------
+  if (url.pathname==='/tokeet-upsert'){
+    if (req.method!=='POST'){ res.statusCode=405; res.setHeader('Content-Type','application/json'); res.end(JSON.stringify({ok:false,error:'Method Not Allowed. Use POST.'})); return; }
+    try{
       const body = await parseBody(req).catch(()=>({}));
-      const feedUrl = body.feed_url || process.env.TOKEET_FEED_URL;
-      if (!feedUrl) { res.status(400).json({ ok:false, error:'missing feed_url (body) or TOKEET_FEED_URL env' }); return; }
-
-      const feed = await fetchJson(resolveTemplateDates(feedUrl));
-      if (!feed.ok) { res.status(feed.status||500).json({ ok:false, error:'fetch feed failed', body: feed.text }); return; }
+      const feedUrlRaw = body.feed_url || TOKEET_FEED_URL;
+      if (!feedUrlRaw){ res.statusCode=400; res.end(JSON.stringify({ ok:false, error:'missing feed_url (body) or TOKEET_FEED_URL env' })); return; }
+      const feedUrl = resolveTemplateDates(feedUrlRaw);
+      const feed = await fetchJson(feedUrl);
+      if (!feed.ok){ res.statusCode=feed.status||500; res.end(JSON.stringify({ ok:false, error:'fetch feed failed', body: feed.text })); return; }
 
       const items = Array.isArray(feed.json) ? feed.json : (feed.json?.items || []);
-      const rows = [];
-      for (const it of items) {
+      const rows=[];
+      for (const it of items){
         const label = `${(it.rooms||'').toString()} ${(it.last||it.guest_last||'').toString()}`.trim();
         const r = normalizeStayIdFreeform(label);
-        if (!r.stay_id) continue;
+        const stay_id = r.stay_id; if (!stay_id) continue;
         rows.push({
-          stay_id: r.stay_id,
-          rooms: r.rooms || [],
+          stay_id,
+          rooms: Array.isArray(r.rooms) ? r.rooms : [],
           check_in: it.check_in || null,
           check_out: it.check_out || null,
           expected_guest_count: it.expected_guest_count ?? it.guests ?? null
         });
       }
-      if (!rows.length) { res.status(200).json({ ok:true, upserted:0 }); return; }
+      if (!rows.length){ res.setHeader('Content-Type','application/json'); res.end(JSON.stringify({ ok:true, upserted:0 })); return; }
 
       const put = await fetch(`${SUPABASE_URL}/rest/v1/stays_preseed`, {
-        method:'POST',
-        headers:{ ...baseHeaders, Prefer:'resolution=merge-duplicates' },
-        body: JSON.stringify(rows)
+        method:'POST', headers:{ ...baseHeaders, Prefer:'resolution=merge-duplicates' }, body: JSON.stringify(rows)
       });
       const txt = await put.text();
-      if (!put.ok) { res.status(put.status).json({ ok:false, error:'upsert failed', body:txt }); return; }
-      res.status(200).json({ ok:true, upserted: rows.length }); return;
-    } catch(e){
-      res.status(500).json({ ok:false, error: e.message || 'tokeet-upsert error' }); return;
-    }
+      if (!put.ok){ res.statusCode=put.status; res.end(JSON.stringify({ ok:false, error:'upsert failed', body:txt })); return; }
+      res.setHeader('Content-Type','application/json'); res.end(JSON.stringify({ ok:true, upserted: rows.length })); return;
+    }catch(e){ res.statusCode=500; res.end(JSON.stringify({ ok:false, error:e.message||'tokeet-upsert error' })); return; }
   }
 
-  // --- Tokeet direct rows upsert (this is the one you’re calling) ------------
-  if (req.method === 'POST' && url.pathname === '/tokeet-upsert-rows') {
-    try {
+  // --- /tokeet-upsert-rows (DIRECT preseed) -----------------------------------
+  if (req.method==='POST' && url.pathname==='/tokeet-upsert-rows'){
+    try{
       const body = await parseBody(req).catch(()=>({}));
-      const rows = Array.isArray(body.rows) ? body.rows : [];
-      if (!rows.length) { res.status(400).json({ ok:false, error:'rows array required' }); return; }
+      const rows = Array.isArray(body.rows)? body.rows : [];
+      if (!rows.length){ res.statusCode=400; res.end(JSON.stringify({ ok:false, error:'rows (array) required' })); return; }
+      if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY){ res.statusCode=500; res.end(JSON.stringify({ ok:false, error:'missing SUPABASE envs' })); return; }
+
       const put = await fetch(`${SUPABASE_URL}/rest/v1/stays_preseed`, {
         method:'POST',
         headers:{ ...baseHeaders, Prefer:'resolution=merge-duplicates' },
         body: JSON.stringify(rows)
       });
       const txt = await put.text();
-      if (!put.ok) { res.status(put.status).json({ ok:false, error:'upsert failed', body:txt }); return; }
-      res.status(200).json({ ok:true, upserted: rows.length }); return;
-    } catch(e){
-      res.status(500).json({ ok:false, error: e.message || 'tokeet-upsert-rows error' }); return;
-    }
+      if (!put.ok){ res.statusCode=put.status; res.end(JSON.stringify({ ok:false, error:'upsert failed', body:txt })); return; }
+      res.setHeader('Content-Type','application/json'); res.end(JSON.stringify({ ok:true, upserted: rows.length })); return;
+    }catch(e){ res.statusCode=500; res.end(JSON.stringify({ ok:false, error:e.message||'tokeet-upsert-rows error' })); return; }
   }
 
-  // --- Fallbacks -------------------------------------------------------------
-  if (req.method === 'GET' && url.pathname === '/tokeet-upsert') {
-    res.status(405).json({ ok:false, error:'Method Not Allowed. Use POST.' }); return;
-  }
-
-  // Not found
-  res.status(404).json({ ok:false, error:'Not Found' });
+  // Fallback
+  res.statusCode = 404;
+  res.setHeader('Content-Type','application/json');
+  res.end(JSON.stringify({ ok:false, error:'Not Found' }));
 };

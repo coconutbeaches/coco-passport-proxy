@@ -20,9 +20,9 @@ module.exports = async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const path = url.pathname;
 
-  // CORS (optional but handy)
+  // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, apikey');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, apikey, Accept-Profile, Content-Profile');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   if (req.method === 'OPTIONS') { res.statusCode = 204; res.end(); return; }
 
@@ -44,14 +44,16 @@ module.exports = async (req, res) => {
 
       // Try RPC first
       const rpc = await fetch(`${SUPABASE_URL}/rest/v1/rpc/insert_incoming_guests`, {
-        method: 'POST', headers, body: JSON.stringify(body)
+        method: 'POST',
+        headers: { ...headers, 'Accept-Profile': 'public', 'Content-Profile': 'public' },
+        body: JSON.stringify(body)
       });
 
       if (!rpc.ok) {
-        // Fallback to direct table insert
+        // Fallback: direct table insert
         const tbl = await fetch(`${SUPABASE_URL}/rest/v1/incoming_guests`, {
           method: 'POST',
-          headers: { ...headers, Prefer: 'return=minimal' },
+          headers: { ...headers, 'Accept-Profile': 'public', 'Content-Profile': 'public', Prefer: 'return=minimal' },
           body: JSON.stringify(body.rows || [])
         });
         if (!tbl.ok) {
@@ -61,18 +63,18 @@ module.exports = async (req, res) => {
         res.status(200).json({ ok: true, via: 'table' }); return;
       }
 
-      const text = await rpc.text(); // RPC typically returns []
+      const text = await rpc.text();
       res.status(200).send(text || '[]'); return;
     }
 
-    // EXPORT (tab-delimited 7 columns with header)
+    // EXPORT (tab-delimited 7 columns with header) — force public schema
     if (req.method === 'GET' && path === '/export') {
       const stay_id = url.searchParams.get('stay_id');
       if (!stay_id) { res.status(400).json({ error: 'stay_id required' }); return; }
 
       const select = '%22First%20Name%22,%22Middle%20Name%22,%22Last%20Name%22,%22Gender%22,%22Passport%20Number%22,%22Nationality%22,%22Birthday%22';
       const endpoint = `${SUPABASE_URL}/rest/v1/incoming_guests_export_view?stay_id=eq.${encodeURIComponent(stay_id)}&order=created_at.asc&select=${select}`;
-      const r = await fetch(endpoint, { headers: supaHeaders(SUPABASE_SERVICE_ROLE_KEY) });
+      const r = await fetch(endpoint, { headers: { ...supaHeaders(SUPABASE_SERVICE_ROLE_KEY), 'Accept-Profile': 'public' } });
       const rows = await r.json();
       if (!r.ok) { res.status(r.status).json(rows); return; }
 
@@ -91,13 +93,13 @@ module.exports = async (req, res) => {
       res.status(200).send([header, body].filter(Boolean).join('\n')); return;
     }
 
-    // STATUS
+    // STATUS — force public schema
     if (req.method === 'GET' && path === '/status') {
       const stay_id = url.searchParams.get('stay_id');
       if (!stay_id) { res.status(400).json({ error: 'stay_id required' }); return; }
 
       const endpoint = `${SUPABASE_URL}/rest/v1/v_passport_status_by_stay?stay_id=eq.${encodeURIComponent(stay_id)}`;
-      const r = await fetch(endpoint, { headers: supaHeaders(SUPABASE_SERVICE_ROLE_KEY) });
+      const r = await fetch(endpoint, { headers: { ...supaHeaders(SUPABASE_SERVICE_ROLE_KEY), 'Accept-Profile': 'public' } });
       const j = await r.json();
       if (!r.ok) { res.status(r.status).json(j); return; }
 
@@ -111,7 +113,6 @@ module.exports = async (req, res) => {
       res.status(200).send(out); return;
     }
 
-    // Unknown route
     res.status(404).json({ error: 'Not found' });
   } catch (e) {
     res.status(500).json({ error: e.message || 'Unknown error' });

@@ -34,16 +34,8 @@ const resolveStayId = async (base, key, inputId) => {
   return id;
 };
 
-\1
-  // --- CORS ---
-  const setCORS = () => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, apikey, Accept-Profile, Content-Profile');
-  };
-  setCORS();
-  if (req.method === 'OPTIONS') { res.statusCode = 204; res.end(); return; }
-const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } = process.env;
+module.exports = async (req, res) => {
+  const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } = process.env;
   const url = new URL(req.url, `http://${req.headers.host}`);
   const path = url.pathname;
 

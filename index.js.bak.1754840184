@@ -131,13 +131,6 @@ function normalizeStayIdFreeform(rawInput) {
 }
 
 // ---------- Handler ----------
-async function fetchJson(url, opts={}) {
-  const r = await fetch(url, opts);
-  const text = await r.text();
-  try { return { ok: r.ok, status: r.status, json: JSON.parse(text), text }; }
-  catch { return { ok: r.ok, status: r.status, json: null, text }; }
-}
-
 module.exports = async (req, res) => {
   // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -370,70 +363,5 @@ module.exports = async (req, res) => {
     res.status(404).json({ ok: false, error: 'Not Found' });
   } catch (e) {
     res.status(500).send(e.message || 'server error');
-  }
-
-  // --- Tokeet upsert: pull feed and pre-seed stays_preseed -------------------
-  if (req.method === 'POST' && url.pathname === '/tokeet-upsert') {
-    try {
-      const body = await parseBody(req).catch(()=>({}));
-      const feedUrl = body.feed_url || process.env.TOKEET_FEED_URL;
-      if (!feedUrl) {
-        res.status(400).json({ ok:false, error:'missing feed_url (body) or TOKEET_FEED_URL env' });
-        return;
-      }
-
-      const feed = await fetchJson(feedUrl);
-      if (!feed.ok) {
-        res.status(feed.status || 500).json({ ok:false, error:'fetch feed failed', body: feed.text });
-        return;
-      }
-
-      // Expect an array of bookings with rooms + check-in/out + expected guests
-      const items = Array.isArray(feed.json) ? feed.json : (feed.json.items || []);
-      const rows = [];
-      for (const it of items) {
-        const label = `${(it.rooms||'').toString()} ${(it.last||it.guest_last||'').toString()}`.trim();
-        const r = await fetchJson(`${process.env.VERCEL_URL ? 'https://'+process.env.VERCEL_URL : ''}/resolve?stay_id=${encodeURIComponent(label)}`);
-        const stay_id = (r.json && r.json.stay_id) ? r.json.stay_id : null;
-        if (!stay_id) continue;
-        rows.push({
-          stay_id,
-          rooms: Array.isArray(r.json.rooms) ? r.json.rooms : [],
-          check_in: it.check_in || null,
-          check_out: it.check_out || null,
-          expected_guest_count: it.expected_guest_count ?? it.guests ?? null
-        });
-      }
-
-      if (!rows.length) {
-        res.status(200).json({ ok:true, upserted:0 });
-        return;
-      }
-
-      const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } = process.env;
-      const put = await fetch(`${SUPABASE_URL}/rest/v1/stays_preseed`, {
-        method: 'POST',
-        headers: {
-          apikey: SUPABASE_SERVICE_ROLE_KEY,
-          Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-          'Content-Type': 'application/json',
-          'Prefer': 'resolution=merge-duplicates',
-          'Accept-Profile': 'public',
-          'Content-Profile': 'public'
-        },
-        body: JSON.stringify(rows)
-      });
-      const txt = await put.text();
-      if (!put.ok) {
-        res.status(put.status).json({ ok:false, error:'upsert failed', body: txt });
-        return;
-      }
-
-      res.status(200).json({ ok:true, upserted: rows.length });
-      return;
-    } catch (e) {
-      res.status(500).json({ ok:false, error: e.message || 'tokeet-upsert error' });
-      return;
-    }
   }
 };

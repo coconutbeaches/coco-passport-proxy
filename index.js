@@ -286,4 +286,33 @@ module.exports = async (req, res) => {
   } catch (e) {
     return text(res, 500, 'Server error: ' + (e && e.message ? e.message : 'unknown'));
   }
+
+  // --- Tokeet upsert (direct rows): client posts parsed bookings ----------------
+  if (req.method === 'POST' && url.pathname === '/tokeet-upsert-rows') {
+    try {
+      const body = await parseBody(req).catch(()=>({}));
+      const rows = Array.isArray(body.rows) ? body.rows : [];
+      if (!rows.length) { res.status(400).json({ok:false,error:'rows array required'}); return; }
+
+      const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } = process.env;
+      const put = await fetch(`${SUPABASE_URL}/rest/v1/stays_preseed`, {
+        method: 'POST',
+        headers: {
+          apikey: SUPABASE_SERVICE_ROLE_KEY,
+          Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+          'Content-Type': 'application/json',
+          'Prefer': 'resolution=merge-duplicates',
+          'Accept-Profile': 'public',
+          'Content-Profile': 'public'
+        },
+        body: JSON.stringify(rows)
+      });
+      const txt = await put.text();
+      if (!put.ok) { res.status(put.status).json({ok:false,error:'upsert failed',body:txt}); return; }
+      res.status(200).json({ok:true, upserted: rows.length});
+      return;
+    } catch(e) {
+      res.status(500).json({ok:false,error:e.message||'tokeet-upsert-rows error'}); return;
+    }
+  }
 };

@@ -37,6 +37,8 @@ module.exports = async (req, res) => {
   const needEnv = () => (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY);
   const fetchJSON = async (r) => { const t = await r.text(); try { return JSON.parse(t); } catch { return t; } };
 
+  const BUCKET = 'passports';
+
   try {
     // ===== Binary upload -> /upload
     if (req.method === 'POST' && url.pathname === '/upload') {
@@ -44,13 +46,16 @@ module.exports = async (req, res) => {
       const stay_id = url.searchParams.get('stay_id');
       const filename = url.searchParams.get('filename') || `${crypto.randomUUID()}.jpg`;
       if (!stay_id) return res.status(400).json({ ok:false, error:'stay_id required' });
-      const objectPath = `passports/${stay_id}/${filename}`.replace(/[^A-Za-z0-9/_\.\-]/g,'_');
+
+      const safeName = filename.replace(/[^A-Za-z0-9._-]/g,'_');
+      const objectKey = `${stay_id}/${safeName}`;               // key inside bucket
+      const objectPath = `${BUCKET}/${objectKey}`;              // for storing in DB / returning
 
       // raw body
       const chunks=[]; for await (const c of req) chunks.push(c);
       const buf = Buffer.concat(chunks);
 
-      const put = await fetch(`${SUPABASE_URL}/storage/v1/object/${encodeURIComponent(objectPath)}`, {
+      const put = await fetch(`${SUPABASE_URL}/storage/v1/object/${BUCKET}/${encodeURI(objectKey)}`, {
         method: 'POST',
         headers: {
           apikey: SUPABASE_SERVICE_ROLE_KEY,
@@ -70,14 +75,16 @@ module.exports = async (req, res) => {
       if (needEnv()) return res.status(500).json({ ok:false, error:'Missing env' });
       const { stay_id, url: imgUrl, filename } = await parseBody(req);
       if (!stay_id || !imgUrl) return res.status(400).json({ ok:false, error:'stay_id and url required' });
+
       const safeName = (filename || `${crypto.randomUUID()}.jpg`).replace(/[^A-Za-z0-9._-]/g, '_');
-      const objectPath = `passports/${stay_id}/${safeName}`;
+      const objectKey = `${stay_id}/${safeName}`;
+      const objectPath = `${BUCKET}/${objectKey}`;
 
       const fetchRes = await fetch(imgUrl);
       if (!fetchRes.ok) return res.status(400).json({ ok:false, error:`fetch image failed: ${fetchRes.status}`, body: await fetchRes.text() });
       const buf = Buffer.from(await fetchRes.arrayBuffer());
 
-      const put = await fetch(`${SUPABASE_URL}/storage/v1/object/${encodeURIComponent(objectPath)}`, {
+      const put = await fetch(`${SUPABASE_URL}/storage/v1/object/${BUCKET}/${encodeURI(objectKey)}`, {
         method: 'POST',
         headers: {
           apikey: SUPABASE_SERVICE_ROLE_KEY,

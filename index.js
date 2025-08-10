@@ -105,16 +105,10 @@ module.exports = async (req, res) => {
       const body = await parseBody(req);
       const viaTable = url.searchParams.get('via') === 'table';
 
-      const baseHeaders = {
-        apikey: SUPABASE_SERVICE_ROLE_KEY,
-        Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-        'Content-Type': 'application/json'
-      };
+      const baseHeaders = { apikey: SUPABASE_SERVICE_ROLE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`, 'Content-Type': 'application/json', 'Accept-Profile': 'public', 'Content-Profile': 'public' };
 
       const tryTable = async () => {
-        const tbl = await fetch(`${SUPABASE_URL}/rest/v1/incoming_guests`, {
-          method: 'POST',
-          headers: { ...baseHeaders, Prefer: 'return=minimal' },
+        const tbl = await fetch(`${SUPABASE_URL}/rest/v1/incoming_guests`, { method: 'POST', headers: { ...baseHeaders, Prefer: 'return=minimal', 'Accept-Profile': 'public', 'Content-Profile': 'public' },
           body: JSON.stringify(body.rows || [])
         });
         if (!tbl.ok) return res.status(tbl.status).json({ ok:false, status: tbl.status, error: await fetchJSON(tbl), via:'table' });

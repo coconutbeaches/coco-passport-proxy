@@ -138,6 +138,16 @@ async function fetchJson(url, opts={}) {
   catch { return { ok: r.ok, status: r.status, json: null, text }; }
 }
 
+function pad(n){return n<10?'0'+n:''+n}
+function fmtDate(d, fmt){return fmt.replace('%m',pad(d.getMonth()+1)).replace('%d',pad(d.getDate())).replace('%Y',d.getFullYear())}
+function resolveTemplateDates(urlStr){
+  try{
+    const now=new Date();
+    const tmr=new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth(),now.getUTCDate()+1));
+    return urlStr.replace(/{start:%([^}]+)}/g,lambda=lambda m,fmt:fmtDate(tmr,'%'+fmt)).replace(/{end:%([^}]+)}/g,lambda=lambda m,fmt:fmtDate(tmr,'%'+fmt));
+  }catch(e){return urlStr}
+}
+
 module.exports = async (req, res) => {
   // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');

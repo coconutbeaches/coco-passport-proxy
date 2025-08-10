@@ -1,4 +1,4 @@
-// Minimal CommonJS serverless handler with CORS + all routes
+// Minimal CommonJS serverless handler with CORS + normalized routes
 const crypto = require('crypto');
 
 const parseBody = (req) => new Promise((resolve, reject) => {
@@ -23,19 +23,19 @@ module.exports = async (req, res) => {
     return;
   }
 
-  // Health check never touches env
+  // Normalize trailing slashes once (so /upload-url/ == /upload-url)
+  url.pathname = url.pathname.replace(/\/+$/, '') || '/';
+
+  // Health check (no env touch)
   if (req.method === 'GET' && url.pathname === '/') {
     res.status(200).end('OK: coco-passport-proxy');
     return;
   }
 
-  // Read env only when needed
+  // Lazy-read env only when needed
   const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } = process.env;
-  const fetchJSON = async (resp) => {
-    const txt = await resp.text();
-    try { return JSON.parse(txt); } catch { return txt; }
-  };
   const needEnv = () => (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY);
+  const fetchJSON = async (r) => { const t = await r.text(); try { return JSON.parse(t); } catch { return t; } };
 
   try {
     // ===== Binary upload -> /upload
@@ -46,7 +46,7 @@ module.exports = async (req, res) => {
       if (!stay_id) return res.status(400).json({ ok:false, error:'stay_id required' });
       const objectPath = `passports/${stay_id}/${filename}`.replace(/[^A-Za-z0-9/_\.\-]/g,'_');
 
-      // collect raw body
+      // raw body
       const chunks=[]; for await (const c of req) chunks.push(c);
       const buf = Buffer.concat(chunks);
 
@@ -127,7 +127,6 @@ module.exports = async (req, res) => {
         return await tryTable();
       }
       const txt = await rpc.text();
-      // Some RPCs return empty array text; just pass it through
       res.status(200).send(txt || '[]');
       return;
     }
@@ -139,10 +138,11 @@ module.exports = async (req, res) => {
       const rooms = url.searchParams.get('rooms');
       const last = url.searchParams.get('last');
       let qs = '';
+      const selectCols = encodeURIComponent('"First Name","Middle Name","Last Name","Gender","Passport Number","Nationality","Birthday"');
       if (stay_id) {
-        qs = `stay_id=eq.${encodeURIComponent(stay_id)}&order=created_at.asc&select=${encodeURIComponent('"First Name","Middle Name","Last Name","Gender","Passport Number","Nationality","Birthday"')}`;
+        qs = `stay_id=eq.${encodeURIComponent(stay_id)}&order=created_at.asc&select=${selectCols}`;
       } else if (rooms && last) {
-        qs = `rooms=${encodeURIComponent(rooms)}&last=${encodeURIComponent(last)}&order=created_at.asc&select=${encodeURIComponent('"First Name","Middle Name","Last Name","Gender","Passport Number","Nationality","Birthday"')}`;
+        qs = `rooms=${encodeURIComponent(rooms)}&last=${encodeURIComponent(last)}&order=created_at.asc&select=${selectCols}`;
       } else {
         return res.status(400).end('Missing stay_id or rooms+last');
       }

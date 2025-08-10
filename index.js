@@ -1,176 +1,216 @@
+// Minimal CommonJS serverless handler with CORS + all routes
+const crypto = require('crypto');
+
 const parseBody = (req) => new Promise((resolve, reject) => {
-  let data=''; req.on('data', c => data += c);
-  req.on('end', () => { try { resolve(data ? JSON.parse(data) : {}); } catch (e) { reject(e);} });
+  let data = '';
+  req.on('data', c => data += c);
+  req.on('end', () => { try { resolve(data ? JSON.parse(data) : {}); } catch (e) { reject(e); } });
   req.on('error', reject);
 });
-const readRaw = (req) => new Promise((resolve, reject) => {
-  const chunks=[]; req.on('data', c => chunks.push(c));
-  req.on('end', () => resolve(Buffer.concat(chunks)));
-  req.on('error', reject);
-});
-const H = (key) => ({
-  apikey: key,
-  Authorization: `Bearer ${key}`,
-  'Accept-Profile': 'public',
-  'Content-Profile': 'public'
-});
-const supaHeaders = (key, extra={}) => ({ ...H(key), ...extra });
-const uuid = () => 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{const r=(Math.random()*16)|0,v=c==='x'?r:(r&0x3|0x8);return v.toString(16);});
-const buildStayId = (roomsCsv, lastRaw) => {
-  const last=(lastRaw||'').trim().replace(/\s+/g,' ');
-  const rooms=String(roomsCsv||'').split(',').map(s=>s.trim()).filter(Boolean)
-    .sort((a,b)=>a.localeCompare(b,'en',{numeric:true})).join('_');
-  return rooms && last ? `${rooms}_${last}` : null;
-};
-const resolveStayId = async (base, key, inputId) => {
-  const id=String(inputId||'').trim(); if(!id) return null;
-  let r = await fetch(`${base}/rest/v1/incoming_guests?select=stay_id&stay_id=eq.${encodeURIComponent(id)}&limit=1`, { headers:H(key) });
-  let j = await r.json(); if (Array.isArray(j)&&j.length) return j[0].stay_id;
-  r = await fetch(`${base}/rest/v1/incoming_guests?select=stay_id&stay_id=ilike.${encodeURIComponent(id)}&limit=1`, { headers:H(key) });
-  j = await r.json(); if (Array.isArray(j)&&j.length) return j[0].stay_id;
-  const loose=id.replace(/\s+/g,'_');
-  r = await fetch(`${base}/rest/v1/incoming_guests?select=stay_id&stay_id=ilike.${encodeURIComponent(loose)}&limit=1`, { headers:H(key) });
-  j = await r.json(); if (Array.isArray(j)&&j.length) return j[0].stay_id;
-  return id;
-};
 
-\1
+module.exports = async (req, res) => {
   // --- CORS ---
-  const setCORS = () => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, apikey, Accept-Profile, Content-Profile');
-  };
-  setCORS();
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, apikey, Accept-Profile, Content-Profile');
   if (req.method === 'OPTIONS') { res.statusCode = 204; res.end(); return; }
-const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } = process.env;
-  const url = new URL(req.url, `http://${req.headers.host}`);
-  const path = url.pathname;
 
-  // CORS
-  res.setHeader('Access-Control-Allow-Origin','*');
-  res.setHeader('Access-Control-Allow-Headers','Content-Type, Authorization, apikey, Accept-Profile, Content-Profile, x-upsert');
-  res.setHeader('Access-Control-Allow-Methods','GET,POST,OPTIONS');
-  if (req.method === 'OPTIONS') { res.statusCode = 204; res.end(); return; }
+  let url;
+  try {
+    url = new URL(req.url, `http://${req.headers.host}`);
+  } catch {
+    res.status(400).end('Bad URL');
+    return;
+  }
+
+  // Health check never touches env
+  if (req.method === 'GET' && url.pathname === '/') {
+    res.status(200).end('OK: coco-passport-proxy');
+    return;
+  }
+
+  // Read env only when needed
+  const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } = process.env;
+  const fetchJSON = async (resp) => {
+    const txt = await resp.text();
+    try { return JSON.parse(txt); } catch { return txt; }
+  };
+  const needEnv = () => (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY);
 
   try {
-    if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) { res.status(500).json({ error:'Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY' }); return; }
+    // ===== Binary upload -> /upload
+    if (req.method === 'POST' && url.pathname === '/upload') {
+      if (needEnv()) return res.status(500).json({ ok:false, error:'Missing env' });
+      const stay_id = url.searchParams.get('stay_id');
+      const filename = url.searchParams.get('filename') || `${crypto.randomUUID()}.jpg`;
+      if (!stay_id) return res.status(400).json({ ok:false, error:'stay_id required' });
+      const objectPath = `passports/${stay_id}/${filename}`.replace(/[^A-Za-z0-9/_\.\-]/g,'_');
 
-    // Health
-    if (req.method === 'GET' && path === '/') { res.status(200).setHeader('Content-Type','text/plain; charset=utf-8').end('OK: coco-passport-proxy'); return; }
+      // collect raw body
+      const chunks=[]; for await (const c of req) chunks.push(c);
+      const buf = Buffer.concat(chunks);
 
-    // Recent (debug)
-    if (req.method === 'GET' && path === '/recent') {
-      const ep = `${SUPABASE_URL}/rest/v1/incoming_guests?select=stay_id,first_name,last_name,passport_number,created_at&order=created_at.desc&limit=10`;
-      const r = await fetch(ep, { headers: supaHeaders(SUPABASE_SERVICE_ROLE_KEY) });
-      const j = await r.json(); res.status(r.ok?200:r.status).json(j); return;
+      const put = await fetch(`${SUPABASE_URL}/storage/v1/object/${encodeURIComponent(objectPath)}`, {
+        method: 'POST',
+        headers: {
+          apikey: SUPABASE_SERVICE_ROLE_KEY,
+          Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+          'Content-Type': 'application/octet-stream',
+          'x-upsert': 'true'
+        },
+        body: buf
+      });
+      if (!put.ok) return res.status(put.status).json({ ok:false, error:'storage upload failed', body: await fetchJSON(put) });
+      res.status(200).json({ ok:true, object_path: objectPath });
+      return;
     }
 
-    // INSERT (RPC → table fallback)
-    if (req.method === 'POST' && path === '/insert') {
-      const via = url.searchParams.get('via') || 'auto';
-      const body = await parseBody(req);
-      const headers = supaHeaders(SUPABASE_SERVICE_ROLE_KEY, { 'Content-Type':'application/json' });
+    // ===== URL upload -> /upload-url
+    if (req.method === 'POST' && url.pathname === '/upload-url') {
+      if (needEnv()) return res.status(500).json({ ok:false, error:'Missing env' });
+      const { stay_id, url: imgUrl, filename } = await parseBody(req);
+      if (!stay_id || !imgUrl) return res.status(400).json({ ok:false, error:'stay_id and url required' });
+      const safeName = (filename || `${crypto.randomUUID()}.jpg`).replace(/[^A-Za-z0-9._-]/g, '_');
+      const objectPath = `passports/${stay_id}/${safeName}`;
 
-      const doTable = async () => {
-        const tbl = await fetch(`${SUPABASE_URL}/rest/v1/incoming_guests`, {
-          method:'POST', headers:{ ...headers, Prefer:'return=minimal' }, body: JSON.stringify(body.rows || [])
-        });
-        if (!tbl.ok) return { ok:false, status:tbl.status, error:await tbl.text(), via:'table' };
-        return { ok:true, via:'table' };
+      const fetchRes = await fetch(imgUrl);
+      if (!fetchRes.ok) return res.status(400).json({ ok:false, error:`fetch image failed: ${fetchRes.status}`, body: await fetchRes.text() });
+      const buf = Buffer.from(await fetchRes.arrayBuffer());
+
+      const put = await fetch(`${SUPABASE_URL}/storage/v1/object/${encodeURIComponent(objectPath)}`, {
+        method: 'POST',
+        headers: {
+          apikey: SUPABASE_SERVICE_ROLE_KEY,
+          Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+          'Content-Type': 'application/octet-stream',
+          'x-upsert': 'true'
+        },
+        body: buf
+      });
+      if (!put.ok) return res.status(put.status).json({ ok:false, error:'storage upload failed', body: await fetchJSON(put) });
+      res.status(200).json({ ok:true, object_path: objectPath });
+      return;
+    }
+
+    // ===== Insert -> /insert  (RPC first; fallback table or via=table)
+    if (req.method === 'POST' && url.pathname === '/insert') {
+      if (needEnv()) return res.status(500).json({ ok:false, error:'Missing env' });
+      const body = await parseBody(req);
+      const viaTable = url.searchParams.get('via') === 'table';
+
+      const baseHeaders = {
+        apikey: SUPABASE_SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+        'Content-Type': 'application/json'
       };
 
-      if (via==='table') { const out=await doTable(); res.status(out.ok?200:out.status).json(out); return; }
+      const tryTable = async () => {
+        const tbl = await fetch(`${SUPABASE_URL}/rest/v1/incoming_guests`, {
+          method: 'POST',
+          headers: { ...baseHeaders, Prefer: 'return=minimal' },
+          body: JSON.stringify(body.rows || [])
+        });
+        if (!tbl.ok) return res.status(tbl.status).json({ ok:false, status: tbl.status, error: await fetchJSON(tbl), via:'table' });
+        return res.status(200).json({ ok:true, via:'table' });
+      };
 
-      const rpc = await fetch(`${SUPABASE_URL}/rest/v1/rpc/insert_incoming_guests`, { method:'POST', headers, body: JSON.stringify(body) });
-      if (!rpc.ok) { const out=await doTable(); res.status(out.ok?200:out.status).json(out); return; }
-      const txt = await rpc.text(); res.status(200).setHeader('Content-Type','application/json; charset=utf-8').end(txt || '[]'); return;
-    }
+      if (viaTable) return await tryTable();
 
-    // UPLOAD (binary body)
-    if (req.method === 'POST' && path === '/upload') {
-      const stayParam = url.searchParams.get('stay_id');
-      const rooms = url.searchParams.get('rooms');
-      const last  = url.searchParams.get('last');
-      let stay_id = stayParam || buildStayId(rooms, last);
-      if (!stay_id) { res.status(400).setHeader('Content-Type','text/plain; charset=utf-8').end('stay_id required'); return; }
-      const resolved = await resolveStayId(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, stay_id);
-      const name = (url.searchParams.get('filename') || `${uuid()}.jpg`).replace(/^\/+/, '');
-      const bucket = 'passports';
-      const objectRel = `${resolved}/${name}`;
+      const rpc = await fetch(`${SUPABASE_URL}/rest/v1/rpc/insert_incoming_guests`, {
+        method: 'POST',
+        headers: baseHeaders,
+        body: JSON.stringify(body)
+      });
 
-      const buf = await readRaw(req);
-      const mime = req.headers['content-type'] || 'application/octet-stream';
-
-      const putUrl = `${SUPABASE_URL}/storage/v1/object/${bucket}/${objectRel}`;
-      const up = await fetch(putUrl, { method:'POST', headers:{ ...H(SUPABASE_SERVICE_ROLE_KEY), 'Content-Type': mime, 'x-upsert':'true' }, body: buf });
-      if (!up.ok) { const t=await up.text(); res.status(up.status).setHeader('Content-Type','application/json; charset=utf-8').end(t || '{"error":"upload failed"}'); return; }
-      res.status(200).json({ ok:true, object_path: `${bucket}/${objectRel}` }); return;
-    }
-
-    // UPLOAD from URL (no encoded slashes!)
-    if (req.method === 'POST' && path === '/upload-url') {
-      const { stay_id, url: imgUrl, filename } = await parseBody(req);
-      if (!stay_id || !imgUrl) { res.status(400).json({ ok:false, error:'stay_id and url required' }); return; }
-      const resolved = await resolveStayId(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, stay_id);
-      const safeName = (filename || `${uuid()}.jpg`).replace(/[^A-Za-z0-9._-]/g,'_');
-      const bucket = 'passports';
-      const objectRel = `${resolved}/${safeName}`;
-
-      const f = await fetch(imgUrl);
-      if (!f.ok) { const t=await f.text(); res.status(400).json({ ok:false, error:`fetch image failed: ${f.status}`, body:t }); return; }
-      const buf = Buffer.from(await f.arrayBuffer());
-
-      const putUrl = `${SUPABASE_URL}/storage/v1/object/${bucket}/${objectRel}`;
-      const up = await fetch(putUrl, { method:'POST', headers:{ ...H(SUPABASE_SERVICE_ROLE_KEY), 'Content-Type':'application/octet-stream', 'x-upsert':'true' }, body: buf });
-      if (!up.ok) { const t=await up.text(); res.status(up.status).json({ ok:false, error:'storage upload failed', body:t }); return; }
-
-      res.status(200).json({ ok:true, object_path: `${bucket}/${objectRel}` }); return;
-    }
-
-    // EXPORT — tab-delimited with header
-    if (req.method === 'GET' && path === '/export') {
-      const rooms = url.searchParams.get('rooms');
-      const last  = url.searchParams.get('last');
-      let stay_id = url.searchParams.get('stay_id') || buildStayId(rooms, last);
-      if (!stay_id) { res.status(400).setHeader('Content-Type','text/plain; charset=utf-8').end('stay_id required'); return; }
-      const resolved = await resolveStayId(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, stay_id);
-
-      const sel = '%22First%20Name%22,%22Middle%20Name%22,%22Last%20Name%22,%22Gender%22,%22Passport%20Number%22,%22Nationality%22,%22Birthday%22';
-      const ep = `${SUPABASE_URL}/rest/v1/incoming_guests_export_view?stay_id=eq.${encodeURIComponent(resolved)}&order=created_at.asc&select=${sel}`;
-      const r = await fetch(ep, { headers: supaHeaders(SUPABASE_SERVICE_ROLE_KEY) });
-      const rows = await r.json();
-
-      const header = ['First Name','Middle Name','Last Name','Gender','Passport Number','Nationality','Birthday'].join('\t');
-      const body = (Array.isArray(rows)?rows:[]).map(o=>[
-        o['First Name']??'', o['Middle Name']??'', o['Last Name']??'',
-        o['Gender']??'', o['Passport Number']??'', o['Nationality']??'', o['Birthday']??''
-      ].join('\t')).join('\n');
-
-      res.status(r.ok?200:r.status).setHeader('Content-Type','text/plain; charset=utf-8').end([header, body].filter(Boolean).join('\n')); return;
-    }
-
-    // STATUS — single line
-    if (req.method === 'GET' && path === '/status') {
-      let stay_id = url.searchParams.get('stay_id');
-      if (!stay_id) { res.status(400).setHeader('Content-Type','text/plain; charset=utf-8').end('stay_id required'); return; }
-      const resolved = await resolveStayId(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, stay_id);
-
-      const ep = `${SUPABASE_URL}/rest/v1/v_passport_status_by_stay?stay_id=eq.${encodeURIComponent(resolved)}`;
-      const r = await fetch(ep, { headers: supaHeaders(SUPABASE_SERVICE_ROLE_KEY) });
-      const j = await r.json();
-
-      let out = '0 of ? passports received 📸';
-      if (Array.isArray(j) && j.length) {
-        const { passports_received:x, total_guests:y, status } = j[0];
-        out = y && x >= y ? '✅ All received' : `${x ?? 0} of ${y ?? '?'} passports received 📸`;
-        if (status) out = status;
+      if (!rpc.ok) {
+        // fallback
+        return await tryTable();
       }
-      res.status(200).setHeader('Content-Type','text/plain; charset=utf-8').end(out); return;
+      const txt = await rpc.text();
+      // Some RPCs return empty array text; just pass it through
+      res.status(200).send(txt || '[]');
+      return;
     }
 
-    res.status(404).setHeader('Content-Type','text/plain; charset=utf-8').end('Not found');
+    // ===== Export -> /export  (plain text TSV)
+    if (req.method === 'GET' && url.pathname === '/export') {
+      if (needEnv()) return res.status(500).end('Missing env');
+      const stay_id = url.searchParams.get('stay_id');
+      const rooms = url.searchParams.get('rooms');
+      const last = url.searchParams.get('last');
+      let qs = '';
+      if (stay_id) {
+        qs = `stay_id=eq.${encodeURIComponent(stay_id)}&order=created_at.asc&select=${encodeURIComponent('"First Name","Middle Name","Last Name","Gender","Passport Number","Nationality","Birthday"')}`;
+      } else if (rooms && last) {
+        qs = `rooms=${encodeURIComponent(rooms)}&last=${encodeURIComponent(last)}&order=created_at.asc&select=${encodeURIComponent('"First Name","Middle Name","Last Name","Gender","Passport Number","Nationality","Birthday"')}`;
+      } else {
+        return res.status(400).end('Missing stay_id or rooms+last');
+      }
+
+      const resp = await fetch(`${SUPABASE_URL}/rest/v1/incoming_guests_export_view?${qs}`, {
+        headers: {
+          apikey: SUPABASE_SERVICE_ROLE_KEY,
+          Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+          'Accept-Profile': 'public'
+        }
+      });
+      if (!resp.ok) return res.status(resp.status).end(await resp.text());
+
+      const rows = await resp.json();
+      const header = ['First Name','Middle Name','Last Name','Gender','Passport Number','Nationality','Birthday'].join('\t');
+      const lines = [header, ...rows.map(r => [
+        r['First Name'] ?? '',
+        r['Middle Name'] ?? '',
+        r['Last Name'] ?? '',
+        r['Gender'] ?? '',
+        r['Passport Number'] ?? '',
+        r['Nationality'] ?? '',
+        r['Birthday'] ?? ''
+      ].join('\t'))].join('\n');
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.status(200).end(lines);
+      return;
+    }
+
+    // ===== Status -> /status (plain text)
+    if (req.method === 'GET' && url.pathname === '/status') {
+      if (needEnv()) return res.status(500).end('Missing env');
+      const stay_id = url.searchParams.get('stay_id');
+      if (!stay_id) return res.status(400).end('Missing stay_id');
+
+      const resp = await fetch(`${SUPABASE_URL}/rest/v1/v_passport_status_by_stay?stay_id=eq.${encodeURIComponent(stay_id)}`, {
+        headers: {
+          apikey: SUPABASE_SERVICE_ROLE_KEY,
+          Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+          'Accept-Profile': 'public'
+        }
+      });
+      if (!resp.ok) return res.status(resp.status).end(await resp.text());
+      const arr = await resp.json();
+      const row = arr[0] || {};
+      const out = row.status || (typeof row.passports_received === 'number' ? `${row.passports_received} of ${row.total_guests ?? '?'} passports received 📸` : '0 of ? passports received 📸');
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.status(200).end(out);
+      return;
+    }
+
+    // ===== Recent -> /recent (debug JSON)
+    if (req.method === 'GET' && url.pathname === '/recent') {
+      if (needEnv()) return res.status(500).json({ error:'Missing env' });
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/incoming_guests?select=stay_id,first_name,last_name,passport_number,created_at&order=created_at.desc&limit=10`, {
+        headers: {
+          apikey: SUPABASE_SERVICE_ROLE_KEY,
+          Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+          'Accept-Profile': 'public'
+        }
+      });
+      const json = await fetchJSON(r);
+      res.status(r.ok ? 200 : r.status).json(json);
+      return;
+    }
+
+    res.status(404).end('Not found');
   } catch (e) {
-    res.status(500).json({ error: e.message || 'Unknown error' });
+    res.status(500).end(e && e.message ? e.message : 'Unknown error');
   }
 };

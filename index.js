@@ -1,17 +1,53 @@
 const parseBody = (req) => new Promise((resolve, reject) => {
-  let data = '';
-  req.on('data', c => (data += c));
+  let data = ''; req.on('data', c => data += c);
   req.on('end', () => { try { resolve(data ? JSON.parse(data) : {}); } catch (e) { reject(e); } });
   req.on('error', reject);
 });
 
-const supaHeaders = (key) => ({
+const H = (key) => ({
   apikey: key,
   Authorization: `Bearer ${key}`,
   'Content-Type': 'application/json',
   'Accept-Profile': 'public',
   'Content-Profile': 'public'
 });
+
+// Build stay_id from rooms+last with trimming and basic normalization
+const buildStayId = (roomsCsv, lastRaw) => {
+  const last = (lastRaw || '').trim().replace(/\s+/g, ' ');
+  const rooms = String(roomsCsv || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b, 'en', { numeric: true }))
+    .join('_');
+  return rooms && last ? `${rooms}_${last}` : null;
+};
+
+// Resolve a stay_id case-insensitively (prefers exact if present)
+const resolveStayId = async (supabaseUrl, key, inputId) => {
+  const id = String(inputId || '').trim();
+  if (!id) return null;
+
+  // 1) exact match first
+  let r = await fetch(`${supabaseUrl}/rest/v1/incoming_guests?select=stay_id&stay_id=eq.${encodeURIComponent(id)}&limit=1`, { headers: H(key) });
+  let j = await r.json();
+  if (Array.isArray(j) && j.length) return j[0].stay_id;
+
+  // 2) case-insensitive exact (no wildcards)
+  r = await fetch(`${supabaseUrl}/rest/v1/incoming_guests?select=stay_id&stay_id=ilike.${encodeURIComponent(id)}&limit=1`, { headers: H(key) });
+  j = await r.json();
+  if (Array.isArray(j) && j.length) return j[0].stay_id;
+
+  // 3) tolerate underscore/space differences (rare)
+  const loose = id.replace(/\s+/g, '_');
+  r = await fetch(`${supabaseUrl}/rest/v1/incoming_guests?select=stay_id&stay_id=ilike.${encodeURIComponent(loose)}&limit=1`, { headers: H(key) });
+  j = await r.json();
+  if (Array.isArray(j) && j.length) return j[0].stay_id;
+
+  // Fallback to given id (so inserts/exports can still proceed)
+  return id;
+};
 
 module.exports = async (req, res) => {
   const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } = process.env;
@@ -36,17 +72,17 @@ module.exports = async (req, res) => {
 
     // Recent (debug)
     if (req.method === 'GET' && path === '/recent') {
-      const endpoint = `${SUPABASE_URL}/rest/v1/incoming_guests?select=stay_id,first_name,last_name,passport_number,created_at&order=created_at.desc&limit=10`;
-      const r = await fetch(endpoint, { headers: supaHeaders(SUPABASE_SERVICE_ROLE_KEY) });
+      const ep = `${SUPABASE_URL}/rest/v1/incoming_guests?select=stay_id,first_name,last_name,passport_number,created_at&order=created_at.desc&limit=10`;
+      const r = await fetch(ep, { headers: H(SUPABASE_SERVICE_ROLE_KEY) });
       const j = await r.json();
       res.status(r.ok ? 200 : r.status).json(j); return;
     }
 
-    // Insert
+    // Insert (RPC then fallback to table)
     if (req.method === 'POST' && path === '/insert') {
       const via = url.searchParams.get('via') || 'auto';
       const body = await parseBody(req);
-      const headers = supaHeaders(SUPABASE_SERVICE_ROLE_KEY);
+      const headers = H(SUPABASE_SERVICE_ROLE_KEY);
 
       const doTable = async () => {
         const tbl = await fetch(`${SUPABASE_URL}/rest/v1/incoming_guests`, {
@@ -60,7 +96,6 @@ module.exports = async (req, res) => {
         const out = await doTable(); res.status(out.ok ? 200 : out.status).json(out); return;
       }
 
-      // Try RPC first
       const rpc = await fetch(`${SUPABASE_URL}/rest/v1/rpc/insert_incoming_guests`, {
         method: 'POST', headers, body: JSON.stringify(body)
       });
@@ -69,21 +104,22 @@ module.exports = async (req, res) => {
         const out = await doTable(); res.status(out.ok ? 200 : out.status).json(out); return;
       }
 
-      // RPC success — return [] as-is
       const txt = await rpc.text();
       res.status(200).setHeader('Content-Type','application/json; charset=utf-8').end(txt || '[]'); return;
     }
 
-    // Export — tab-delimited text
+    // Export — accepts stay_id OR rooms+last; case-insensitive resolve; returns tab-delimited text
     if (req.method === 'GET' && path === '/export') {
-      const stay_id = url.searchParams.get('stay_id');
+      const rooms = url.searchParams.get('rooms');
+      const last  = url.searchParams.get('last');
+      let stay_id = url.searchParams.get('stay_id') || buildStayId(rooms, last);
       if (!stay_id) { res.status(400).setHeader('Content-Type','text/plain; charset=utf-8').end('stay_id required'); return; }
 
+      const resolved = await resolveStayId(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, stay_id);
       const sel = '%22First%20Name%22,%22Middle%20Name%22,%22Last%20Name%22,%22Gender%22,%22Passport%20Number%22,%22Nationality%22,%22Birthday%22';
-      const endpoint = `${SUPABASE_URL}/rest/v1/incoming_guests_export_view?stay_id=eq.${encodeURIComponent(stay_id)}&order=created_at.asc&select=${sel}`;
-      const r = await fetch(endpoint, { headers: supaHeaders(SUPABASE_SERVICE_ROLE_KEY) });
+      const ep = `${SUPABASE_URL}/rest/v1/incoming_guests_export_view?stay_id=eq.${encodeURIComponent(resolved)}&order=created_at.asc&select=${sel}`;
+      const r = await fetch(ep, { headers: H(SUPABASE_SERVICE_ROLE_KEY) });
       const rows = await r.json();
-      if (!r.ok) { res.status(r.status).setHeader('Content-Type','text/plain; charset=utf-8').end(JSON.stringify(rows)); return; }
 
       const header = ['First Name','Middle Name','Last Name','Gender','Passport Number','Nationality','Birthday'].join('\t');
       const body = (Array.isArray(rows) ? rows : []).map(o => [
@@ -91,18 +127,18 @@ module.exports = async (req, res) => {
         o['Gender'] ?? '', o['Passport Number'] ?? '', o['Nationality'] ?? '', o['Birthday'] ?? ''
       ].join('\t')).join('\n');
 
-      res.status(200).setHeader('Content-Type','text/plain; charset=utf-8').end([header, body].filter(Boolean).join('\n')); return;
+      res.status(r.ok ? 200 : r.status).setHeader('Content-Type','text/plain; charset=utf-8').end([header, body].filter(Boolean).join('\n')); return;
     }
 
-    // Status — single line text
+    // Status — case-insensitive resolve; single line text
     if (req.method === 'GET' && path === '/status') {
-      const stay_id = url.searchParams.get('stay_id');
+      let stay_id = url.searchParams.get('stay_id');
       if (!stay_id) { res.status(400).setHeader('Content-Type','text/plain; charset=utf-8').end('stay_id required'); return; }
+      const resolved = await resolveStayId(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, stay_id);
 
-      const endpoint = `${SUPABASE_URL}/rest/v1/v_passport_status_by_stay?stay_id=eq.${encodeURIComponent(stay_id)}`;
-      const r = await fetch(endpoint, { headers: supaHeaders(SUPABASE_SERVICE_ROLE_KEY) });
+      const ep = `${SUPABASE_URL}/rest/v1/v_passport_status_by_stay?stay_id=eq.${encodeURIComponent(resolved)}`;
+      const r = await fetch(ep, { headers: H(SUPABASE_SERVICE_ROLE_KEY) });
       const j = await r.json();
-      if (!r.ok) { res.status(r.status).setHeader('Content-Type','text/plain; charset=utf-8').end(JSON.stringify(j)); return; }
 
       let out = '0 of ? passports received 📸';
       if (Array.isArray(j) && j.length) {
@@ -113,7 +149,7 @@ module.exports = async (req, res) => {
       res.status(200).setHeader('Content-Type','text/plain; charset=utf-8').end(out); return;
     }
 
-    res.status(404).json({ error: 'Not found' });
+    res.status(404).setHeader('Content-Type','text/plain; charset=utf-8').end('Not found');
   } catch (e) {
     res.status(500).json({ error: e.message || 'Unknown error' });
   }

@@ -57,6 +57,9 @@ const resolveStayId = async (supabaseUrl, key, inputId) => {
   return id;
 };
 
+// Supabase headers helper for REST calls
+const supaHeaders = (key, extra = {}) => ({ ...H(key), ...extra });
+
 module.exports = async (req, res) => {
   const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } = process.env;
   const url = new URL(req.url, `http://${req.headers.host}`);
@@ -81,7 +84,7 @@ module.exports = async (req, res) => {
     // Recent (debug)
     if (req.method === 'GET' && path === '/recent') {
       const ep = `${SUPABASE_URL}/rest/v1/incoming_guests?select=stay_id,first_name,last_name,passport_number,created_at&order=created_at.desc&limit=10`;
-      const r = await fetch(ep, { headers: H(SUPABASE_SERVICE_ROLE_KEY) });
+      const r = await fetch(ep, { headers: supaHeaders(SUPABASE_SERVICE_ROLE_KEY) });
       const j = await r.json();
       res.status(r.ok ? 200 : r.status).json(j); return;
     }
@@ -90,7 +93,7 @@ module.exports = async (req, res) => {
     if (req.method === 'POST' && path === '/insert') {
       const via = url.searchParams.get('via') || 'auto';
       const body = await parseBody(req);
-      const headers = { ...H(SUPABASE_SERVICE_ROLE_KEY), 'Content-Type': 'application/json' };
+      const headers = supaHeaders(SUPABASE_SERVICE_ROLE_KEY, { 'Content-Type': 'application/json' });
 
       const doTable = async () => {
         const tbl = await fetch(`${SUPABASE_URL}/rest/v1/incoming_guests`, {
@@ -116,7 +119,7 @@ module.exports = async (req, res) => {
       res.status(200).setHeader('Content-Type','application/json; charset=utf-8').end(txt || '[]'); return;
     }
 
-    // UPLOAD (binary) — expects query: stay_id=...&filename=optional.jpg
+    // UPLOAD (binary) — FIXED: do NOT encode slashes; send /object/<bucket>/<object>
     if (req.method === 'POST' && path === '/upload') {
       const stayParam = url.searchParams.get('stay_id');
       const rooms = url.searchParams.get('rooms');
@@ -125,22 +128,28 @@ module.exports = async (req, res) => {
       if (!stay_id) { res.status(400).setHeader('Content-Type','text/plain; charset=utf-8').end('stay_id required'); return; }
 
       const resolved = await resolveStayId(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, stay_id);
-      const name = url.searchParams.get('filename') || `${uuid()}.jpg`;
-      const objectPath = `passports/${resolved}/${name}`;
+      const name = (url.searchParams.get('filename') || `${uuid()}.jpg`).replace(/^\/+/, '');
+      const bucket = 'passports';
+      const objectPath = `${resolved}/${name}`; // keep slashes!
 
       const buf = await readRaw(req);
-      const up = await fetch(`${SUPABASE_URL}/storage/v1/object/${encodeURIComponent(objectPath)}`, {
-        method: 'PUT',
-        headers: { ...H(SUPABASE_SERVICE_ROLE_KEY), 'Content-Type': req.headers['content-type'] || 'application/octet-stream' },
+      const mime = req.headers['content-type'] || 'application/octet-stream';
+
+      // Important: bucket and object are separate path segments; do not encode slashes.
+      const putUrl = `${SUPABASE_URL}/storage/v1/object/${bucket}/${objectPath}`;
+
+      const up = await fetch(putUrl, {
+        method: 'POST', // POST creates-or-upserts; PUT also works, but POST is recommended in docs for new objects
+        headers: { ...H(SUPABASE_SERVICE_ROLE_KEY), 'Content-Type': mime },
         body: buf
       });
 
       if (!up.ok) {
         const t = await up.text();
-        res.status(up.status).setHeader('Content-Type','application/json').end(t || '{"error":"upload failed"}'); return;
+        res.status(up.status).setHeader('Content-Type','application/json; charset=utf-8').end(t || '{"error":"upload failed"}'); return;
       }
 
-      res.status(200).json({ ok: true, object_path: objectPath }); return;
+      res.status(200).json({ ok: true, object_path: `${bucket}/${objectPath}` }); return;
     }
 
     // EXPORT — stay_id OR rooms+last; tab-delimited
@@ -153,7 +162,7 @@ module.exports = async (req, res) => {
       const resolved = await resolveStayId(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, stay_id);
       const sel = '%22First%20Name%22,%22Middle%20Name%22,%22Last%20Name%22,%22Gender%22,%22Passport%20Number%22,%22Nationality%22,%22Birthday%22';
       const ep = `${SUPABASE_URL}/rest/v1/incoming_guests_export_view?stay_id=eq.${encodeURIComponent(resolved)}&order=created_at.asc&select=${sel}`;
-      const r = await fetch(ep, { headers: H(SUPABASE_SERVICE_ROLE_KEY) });
+      const r = await fetch(ep, { headers: supaHeaders(SUPABASE_SERVICE_ROLE_KEY) });
       const rows = await r.json();
 
       const header = ['First Name','Middle Name','Last Name','Gender','Passport Number','Nationality','Birthday'].join('\t');
@@ -172,7 +181,7 @@ module.exports = async (req, res) => {
       const resolved = await resolveStayId(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, stay_id);
 
       const ep = `${SUPABASE_URL}/rest/v1/v_passport_status_by_stay?stay_id=eq.${encodeURIComponent(resolved)}`;
-      const r = await fetch(ep, { headers: H(SUPABASE_SERVICE_ROLE_KEY) });
+      const r = await fetch(ep, { headers: supaHeaders(SUPABASE_SERVICE_ROLE_KEY) });
       const j = await r.json();
 
       let out = '0 of ? passports received 📸';

@@ -7,12 +7,24 @@ const parseBody = (req) => new Promise((resolve, reject) => {
 const H = (key) => ({
   apikey: key,
   Authorization: `Bearer ${key}`,
-  'Content-Type': 'application/json',
   'Accept-Profile': 'public',
   'Content-Profile': 'public'
 });
 
-// Build stay_id from rooms+last with trimming and basic normalization
+const readRaw = (req) => new Promise((resolve, reject) => {
+  const chunks = [];
+  req.on('data', c => chunks.push(c));
+  req.on('end', () => resolve(Buffer.concat(chunks)));
+  req.on('error', reject);
+});
+
+const uuid = () =>
+  'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = (Math.random()*16)|0, v = c === 'x' ? r : (r&0x3|0x8);
+    return v.toString(16);
+  });
+
+// Build stay_id from rooms+last
 const buildStayId = (roomsCsv, lastRaw) => {
   const last = (lastRaw || '').trim().replace(/\s+/g, ' ');
   const rooms = String(roomsCsv || '')
@@ -24,28 +36,24 @@ const buildStayId = (roomsCsv, lastRaw) => {
   return rooms && last ? `${rooms}_${last}` : null;
 };
 
-// Resolve a stay_id case-insensitively (prefers exact if present)
+// Resolve stay_id (case-insensitive)
 const resolveStayId = async (supabaseUrl, key, inputId) => {
   const id = String(inputId || '').trim();
   if (!id) return null;
 
-  // 1) exact match first
   let r = await fetch(`${supabaseUrl}/rest/v1/incoming_guests?select=stay_id&stay_id=eq.${encodeURIComponent(id)}&limit=1`, { headers: H(key) });
   let j = await r.json();
   if (Array.isArray(j) && j.length) return j[0].stay_id;
 
-  // 2) case-insensitive exact (no wildcards)
   r = await fetch(`${supabaseUrl}/rest/v1/incoming_guests?select=stay_id&stay_id=ilike.${encodeURIComponent(id)}&limit=1`, { headers: H(key) });
   j = await r.json();
   if (Array.isArray(j) && j.length) return j[0].stay_id;
 
-  // 3) tolerate underscore/space differences (rare)
   const loose = id.replace(/\s+/g, '_');
   r = await fetch(`${supabaseUrl}/rest/v1/incoming_guests?select=stay_id&stay_id=ilike.${encodeURIComponent(loose)}&limit=1`, { headers: H(key) });
   j = await r.json();
   if (Array.isArray(j) && j.length) return j[0].stay_id;
 
-  // Fallback to given id (so inserts/exports can still proceed)
   return id;
 };
 
@@ -78,11 +86,11 @@ module.exports = async (req, res) => {
       res.status(r.ok ? 200 : r.status).json(j); return;
     }
 
-    // Insert (RPC then fallback to table)
+    // INSERT (RPC → table)
     if (req.method === 'POST' && path === '/insert') {
       const via = url.searchParams.get('via') || 'auto';
       const body = await parseBody(req);
-      const headers = H(SUPABASE_SERVICE_ROLE_KEY);
+      const headers = { ...H(SUPABASE_SERVICE_ROLE_KEY), 'Content-Type': 'application/json' };
 
       const doTable = async () => {
         const tbl = await fetch(`${SUPABASE_URL}/rest/v1/incoming_guests`, {
@@ -108,7 +116,34 @@ module.exports = async (req, res) => {
       res.status(200).setHeader('Content-Type','application/json; charset=utf-8').end(txt || '[]'); return;
     }
 
-    // Export — accepts stay_id OR rooms+last; case-insensitive resolve; returns tab-delimited text
+    // UPLOAD (binary) — expects query: stay_id=...&filename=optional.jpg
+    if (req.method === 'POST' && path === '/upload') {
+      const stayParam = url.searchParams.get('stay_id');
+      const rooms = url.searchParams.get('rooms');
+      const last  = url.searchParams.get('last');
+      let stay_id = stayParam || buildStayId(rooms, last);
+      if (!stay_id) { res.status(400).setHeader('Content-Type','text/plain; charset=utf-8').end('stay_id required'); return; }
+
+      const resolved = await resolveStayId(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, stay_id);
+      const name = url.searchParams.get('filename') || `${uuid()}.jpg`;
+      const objectPath = `passports/${resolved}/${name}`;
+
+      const buf = await readRaw(req);
+      const up = await fetch(`${SUPABASE_URL}/storage/v1/object/${encodeURIComponent(objectPath)}`, {
+        method: 'PUT',
+        headers: { ...H(SUPABASE_SERVICE_ROLE_KEY), 'Content-Type': req.headers['content-type'] || 'application/octet-stream' },
+        body: buf
+      });
+
+      if (!up.ok) {
+        const t = await up.text();
+        res.status(up.status).setHeader('Content-Type','application/json').end(t || '{"error":"upload failed"}'); return;
+      }
+
+      res.status(200).json({ ok: true, object_path: objectPath }); return;
+    }
+
+    // EXPORT — stay_id OR rooms+last; tab-delimited
     if (req.method === 'GET' && path === '/export') {
       const rooms = url.searchParams.get('rooms');
       const last  = url.searchParams.get('last');
@@ -130,7 +165,7 @@ module.exports = async (req, res) => {
       res.status(r.ok ? 200 : r.status).setHeader('Content-Type','text/plain; charset=utf-8').end([header, body].filter(Boolean).join('\n')); return;
     }
 
-    // Status — case-insensitive resolve; single line text
+    // STATUS — single line
     if (req.method === 'GET' && path === '/status') {
       let stay_id = url.searchParams.get('stay_id');
       if (!stay_id) { res.status(400).setHeader('Content-Type','text/plain; charset=utf-8').end('stay_id required'); return; }

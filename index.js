@@ -437,3 +437,62 @@ module.exports = async (req, res) => {
   // Fallback
   return send(res, 404, { ok: false, error: "Not Found" });
 };
+
+// === /resolve endpoint for canonical stay_id ===
+app.get('/resolve', (req, res) => {
+  try {
+    let raw = req.query.stay_id || req.body?.stay_id || '';
+    raw = decodeURIComponent(raw).trim();
+
+    const roomsList = [
+      'A3','A4','A5','A6','A7','A8','A9',
+      'B6','B7','B8','B9',
+      'Double House','Jungle House','Beach House','New House'
+    ];
+
+    const parts = raw.split(/[\s_]+/).filter(Boolean);
+    let roomsFound = [];
+    let lastNameParts = [];
+
+    let i = 0;
+    while (i < parts.length) {
+      let twoWord = (parts[i] + ' ' + (parts[i + 1] || '')).toLowerCase();
+      let matchTwo = roomsList.find(r => r.toLowerCase() === twoWord);
+      if (matchTwo) {
+        roomsFound.push(matchTwo);
+        i += 2;
+        continue;
+      }
+      let oneWord = parts[i].toLowerCase();
+      let matchOne = roomsList.find(r => r.toLowerCase() === oneWord);
+      if (matchOne) {
+        roomsFound.push(matchOne);
+        i += 1;
+        continue;
+      }
+      lastNameParts.push(parts[i]);
+      i += 1;
+    }
+
+    const cap = s => s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+    const lastNameCanonical = lastNameParts.map(cap).join('');
+
+    const stay_id = [...roomsFound, lastNameCanonical]
+      .filter(Boolean)
+      .join('_');
+
+    res.json({
+      input: raw,
+      rooms_in: roomsFound.join(', '),
+      last_in: lastNameParts.join(' '),
+      rooms: roomsFound,
+      last_name_canonical: lastNameCanonical,
+      stay_id
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+// === End /resolve endpoint ===
+

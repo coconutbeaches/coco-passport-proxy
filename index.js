@@ -89,16 +89,16 @@ async function parseBody(req){
 
 module.exports = async (req, res) => {
   // Safe URL parsing + permissive CORS + OPTIONS early-exit
-  let url;
-  try { url = new URL(req.url, "https://x.local"); }
-  catch { url = { pathname: String(req.url || "/"), searchParams: new URLSearchParams() }; }
+  let _url;
+  try { _url = new URL(req.url, "https://x.local"); }
+  catch {  _url = { pathname: String(req.url || "/"), searchParams: new URLSearchParams() }; }
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, apikey, Accept-Profile, Content-Profile");
   if (req.method === "OPTIONS") { res.statusCode = 204; return res.end(); }
 
   // --- insert-direct route ---
-  if (url && url.pathname === "/insert-direct") {
+  if (url && _url.pathname === "/insert-direct") {
     try {
       res.setHeader("Content-Type","application/json; charset=utf-8");
       if (req.method === "GET") { res.statusCode=405; return res.end(JSON.stringify({ ok:false, error:"Method Not Allowed. Use POST." })); }
@@ -144,12 +144,12 @@ module.exports = async (req, res) => {
   if (sendCORS(req,res)) return;
 
   // URL + path normalize
-  let url;
-  try { url = new URL(req.url, 'http://local'); } catch { res.statusCode=400; res.end('Bad URL'); return; }
-  url.pathname = (url.pathname.replace(/\/+$/,'') || '/');
+  let _url;
+  try { _url = new URL(req.url, 'http://local'); } catch { res.statusCode=400; res.end('Bad URL'); return; }
+  _url.pathname = (_url.pathname.replace(/\/+$/,'') || '/');
 
   // Health
-  if (req.method==='GET' && url.pathname==='/') { res.setHeader('Content-Type','text/plain'); res.end('OK: coco-passport-proxy'); return; }
+  if (req.method==='GET' && _url.pathname==='/') { res.setHeader('Content-Type','text/plain'); res.end('OK: coco-passport-proxy'); return; }
 
   const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, TOKEET_FEED_URL } = process.env || {};
   const baseHeaders = {
@@ -161,16 +161,16 @@ module.exports = async (req, res) => {
   };
 
   // --- /resolve ----------------------------------------------------------------
-  if (req.method==='GET' && url.pathname==='/resolve'){
-    const q = url.searchParams.get('stay_id') || '';
+  if (req.method==='GET' && _url.pathname==='/resolve'){
+    const q = _url.searchParams.get('stay_id') || '';
     const out = normalizeStayIdFreeform(q);
     res.setHeader('Content-Type','application/json'); res.end(JSON.stringify(out)); return;
   }
 
   // --- /upload (binary) --------------------------------------------------------
-  if (req.method==='POST' && url.pathname==='/upload'){
+  if (req.method==='POST' && _url.pathname==='/upload'){
     try{
-      const stay_id = url.searchParams.get('stay_id'); const filename = (url.searchParams.get('filename')||`${crypto.randomUUID()}.jpg`).replace(/[^A-Za-z0-9._-]/g,'_');
+      const stay_id = _url.searchParams.get('stay_id'); const filename = (_url.searchParams.get('filename')||`${crypto.randomUUID()}.jpg`).replace(/[^A-Za-z0-9._-]/g,'_');
       if (!stay_id){ res.statusCode=400; res.end(JSON.stringify({ok:false,error:'stay_id required'})); return; }
       const objectPath = `passports/${stay_id}/${filename}`;
       const chunks=[]; for await (const c of req) chunks.push(c); const buf = Buffer.concat(chunks);
@@ -186,7 +186,7 @@ module.exports = async (req, res) => {
   }
 
   // --- /upload-url (server fetches from URL) -----------------------------------
-  if (req.method==='POST' && url.pathname==='/upload-url'){
+  if (req.method==='POST' && _url.pathname==='/upload-url'){
     try{
       const { stay_id, url:imgUrl, filename } = await parseBody(req);
       if (!stay_id || !imgUrl){ res.statusCode=400; res.end(JSON.stringify({ok:false,error:'stay_id and url required'})); return; }
@@ -204,7 +204,7 @@ module.exports = async (req, res) => {
   }
 
   // --- /insert (RPC first, fallback table) ------------------------------------
-  if (req.method==='POST' && url.pathname==='/insert'){
+  if (req.method==='POST' && _url.pathname==='/insert'){
     const body = await parseBody(req).catch(()=>({}));
     const rows = Array.isArray(body.rows)? body.rows : [];
     if (!rows.length){ res.setHeader('Content-Type','application/json'); res.statusCode=400; res.end(JSON.stringify({ok:false,error:'rows (array) required'})); return; }
@@ -232,10 +232,10 @@ module.exports = async (req, res) => {
   }
 
   // --- /export (tab-delimited 7 cols, header) ---------------------------------
-  if (req.method==='GET' && url.pathname==='/export'){
-    const stay_id = url.searchParams.get('stay_id');
-    const rooms = url.searchParams.get('rooms');
-    const last = url.searchParams.get('last');
+  if (req.method==='GET' && _url.pathname==='/export'){
+    const stay_id = _url.searchParams.get('stay_id');
+    const rooms = _url.searchParams.get('rooms');
+    const last = _url.searchParams.get('last');
     let effectiveStay = stay_id;
     if (!effectiveStay && (rooms || last)){
       const label = [rooms||'', last||''].join(' ').trim();
@@ -266,8 +266,8 @@ module.exports = async (req, res) => {
   }
 
   // --- /status (one-line) -----------------------------------------------------
-  if (req.method==='GET' && url.pathname==='/status'){
-    const stay_id = url.searchParams.get('stay_id');
+  if (req.method==='GET' && _url.pathname==='/status'){
+    const stay_id = _url.searchParams.get('stay_id');
     res.setHeader('Content-Type','text/plain; charset=utf-8');
     if (!stay_id){ res.end('0 of ? passports received 📸'); return; }
     const qs = new URLSearchParams({ 'stay_id': `eq.${stay_id}` }).toString();
@@ -280,7 +280,7 @@ module.exports = async (req, res) => {
   }
 
   // --- /tokeet-upsert (pull feed URL, preseed) --------------------------------
-  if (url.pathname==='/tokeet-upsert'){
+  if (_url.pathname==='/tokeet-upsert'){
     if (req.method!=='POST'){ res.statusCode=405; res.setHeader('Content-Type','application/json'); res.end(JSON.stringify({ok:false,error:'Method Not Allowed. Use POST.'})); return; }
     try{
       const body = await parseBody(req).catch(()=>({}));
@@ -316,7 +316,7 @@ module.exports = async (req, res) => {
   }
 
   // --- /tokeet-upsert-rows (DIRECT preseed) -----------------------------------
-  if (req.method==='POST' && url.pathname==='/tokeet-upsert-rows'){
+  if (req.method==='POST' && _url.pathname==='/tokeet-upsert-rows'){
     try{
       const body = await parseBody(req).catch(()=>({}));
       const rows = Array.isArray(body.rows)? body.rows : [];
@@ -340,7 +340,7 @@ module.exports = async (req, res) => {
   res.end(JSON.stringify({ ok:false, error:'Not Found' }));
 
   // --- insert-direct: force table insert, return Supabase representation -------
-  if (req.method === 'POST' && url.pathname === '/insert-direct') {
+  if (req.method === 'POST' && _url.pathname === '/insert-direct') {
     try {
       const body = await parseBody(req).catch(()=>({}));
       const rows = Array.isArray(body?.rows) ? body.rows : [];
@@ -383,9 +383,9 @@ module.exports = async (req, res) => {
   }
 
   // --- recent: last N rows from incoming_guests --------------------------------
-  if (req.method === 'GET' && url.pathname === '/recent') {
+  if (req.method === 'GET' && _url.pathname === '/recent') {
     try {
-      const limit = Math.max(1, Math.min(50, parseInt(url.searchParams.get('limit')||'10',10)));
+      const limit = Math.max(1, Math.min(50, parseInt(_url.searchParams.get('limit')||'10',10)));
       const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } = process.env || {};
       if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
         res.status(500).json({ ok:false, error:'missing SUPABASE envs' }); return;

@@ -77,6 +77,54 @@ function normalizeStayIdFreeform(raw){
 }
 
 module.exports = async (req, res) => {
+  // ---------- HOTFIX: force-table route ----------
+  try {
+    const urlObj = new URL(req.url, 'https://x.local');
+    if (req.method === 'POST' && urlObj.pathname === '/insert-table') {
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      // read body (no for-await)
+      const raw = await new Promise((resolve,reject)=>{
+        try{
+          const chunks=[]; req.on('data',c=>chunks.push(Buffer.isBuffer(c)?c:Buffer.from(c)));
+          req.on('end',()=>resolve(Buffer.concat(chunks).toString('utf8')));
+          req.on('error',reject);
+        }catch(e){ resolve(''); }
+      });
+      let body={}; try{ body = raw ? JSON.parse(raw) : {}; } catch { body = {}; }
+      const rows = Array.isArray(body.rows) ? body.rows : null;
+      if (!rows) { res.statusCode=400; return res.end(JSON.stringify({ ok:false, error:'rows (array) required' })); }
+
+      // normalize photo_urls -> []
+      const payload = rows.map(r => ({ ...r, photo_urls: Array.isArray(r.photo_urls) ? r.photo_urls.filter(Boolean) : [] }));
+
+      const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } = process.env || {};
+      if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+        res.statusCode=500; return res.end(JSON.stringify({ ok:false, error:'missing SUPABASE envs' }));
+      }
+
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/incoming_guests`, {
+        method: 'POST',
+        headers: {
+          apikey: SUPABASE_SERVICE_ROLE_KEY,
+          Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+          'Content-Type': 'application/json',
+          'Accept-Profile': 'public',
+          'Content-Profile': 'public',
+          Prefer: 'return=representation,resolution=merge-duplicates'
+        },
+        body: JSON.stringify(payload)
+      });
+      const txt = await r.text();
+      let data; try { data = JSON.parse(txt); } catch { data = []; }
+      if (!r.ok) {
+        res.statusCode=r.status;
+        return res.end(JSON.stringify({ ok:false, error:'supabase insert failed', status:r.status, body: txt.slice(0,400) }));
+      }
+      const inserted = Array.isArray(data) ? data.length : (Array.isArray(data.rows)?data.rows.length:payload.length);
+      return res.end(JSON.stringify({ ok:true, via:'table', inserted, rows:data }));
+    }
+  } catch(_) {}
+  // ---------- END HOTFIX ----------
   // ---- force table-backed /insert that returns an object (not [] ) ----
   try {
     const __u = new URL(req.url, 'http://x'); // safe parse

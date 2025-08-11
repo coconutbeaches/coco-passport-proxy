@@ -1,5 +1,39 @@
 const crypto = require('crypto');
 
+// Base URL configuration with runtime safety check
+const PUBLIC_PASSPORT_PROXY_URL = 'https://coco-passport-proxy.vercel.app';
+
+// Runtime "public-URL or bust" safety check
+function validateAndGetBaseUrl() {
+  // Allow environment override, but default to public URL
+  const configuredUrl = process.env.PASSPORT_PROXY_BASE_URL || PUBLIC_PASSPORT_PROXY_URL;
+  
+  try {
+    const url = new URL(configuredUrl);
+    
+    // Safety check: if using vercel.app domain, ensure it's the correct subdomain
+    if (url.hostname.endsWith('.vercel.app') && url.hostname !== 'coco-passport-proxy.vercel.app') {
+      console.error(
+        `[SAFETY CHECK] Configured base URL '${configuredUrl}' uses vercel.app domain ` +
+        `with incorrect subdomain '${url.hostname}'. This could be a TestFlight build drift. ` +
+        `Falling back to public URL: ${PUBLIC_PASSPORT_PROXY_URL}`
+      );
+      return PUBLIC_PASSPORT_PROXY_URL;
+    }
+    
+    return configuredUrl;
+  } catch (error) {
+    console.error(
+      `[SAFETY CHECK] Invalid base URL '${configuredUrl}': ${error.message}. ` +
+      `Falling back to public URL: ${PUBLIC_PASSPORT_PROXY_URL}`
+    );
+    return PUBLIC_PASSPORT_PROXY_URL;
+  }
+}
+
+// Base URL constant for the passport proxy service (with safety check applied)
+const PASSPORT_PROXY_BASE_URL = validateAndGetBaseUrl();
+
 // --- tiny helpers ------------------------------------------------------------
 const parseBody = (req) => new Promise((resolve, reject) => {
   let data = ''; req.on('data', c => data += c);
@@ -251,7 +285,17 @@ module.exports = async (req, res) => {
 
     // RPC try
     const rpc = await fetch(`${SUPABASE_URL}/rest/v1/rpc/insert_incoming_guests`, { method:'POST', headers: baseHeaders, body: JSON.stringify(body) });
-    if (rpc.ok){ const text = await rpc.text(); res.setHeader('Content-Type','application/json'); res.statusCode=200; res.end(text || '[]'); return; }
+    if (rpc.ok){ 
+      const text = await rpc.text(); 
+      // Wrap RPC response in iOS-expected envelope format
+      let rpcData;
+      try { rpcData = JSON.parse(text || '[]'); } catch { rpcData = []; }
+      const inserted = Array.isArray(rpcData) ? rpcData.length : 0;
+      res.setHeader('Content-Type','application/json'); 
+      res.statusCode=200; 
+      res.end(JSON.stringify({ ok:true, via:'rpc', inserted, rows: rpcData })); 
+      return; 
+    }
 
     // fallback table insert
     const tbl = await fetch(`${SUPABASE_URL}/rest/v1/incoming_guests`, {

@@ -88,6 +88,58 @@ async function parseBody(req){
 }
 
 module.exports = async (req, res) => {
+  // Safe URL parsing + permissive CORS + OPTIONS early-exit
+  let url;
+  try { url = new URL(req.url, "https://x.local"); }
+  catch { url = { pathname: String(req.url || "/"), searchParams: new URLSearchParams() }; }
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, apikey, Accept-Profile, Content-Profile");
+  if (req.method === "OPTIONS") { res.statusCode = 204; return res.end(); }
+
+  // --- insert-direct route ---
+  if (url && url.pathname === "/insert-direct") {
+    try {
+      res.setHeader("Content-Type","application/json; charset=utf-8");
+      if (req.method === "GET") { res.statusCode=405; return res.end(JSON.stringify({ ok:false, error:"Method Not Allowed. Use POST." })); }
+      if (req.method !== "POST") { res.statusCode=405; return res.end(JSON.stringify({ ok:false, error:"Method Not Allowed." })); }
+
+      const chunks = [];
+      for await (const c of req) chunks.push(Buffer.isBuffer(c)?c:Buffer.from(c));
+      const raw = Buffer.concat(chunks).toString("utf8");
+
+      let body = {}; try { body = raw ? JSON.parse(raw) : {}; } catch { body = {}; }
+      const rows = Array.isArray(body.rows) ? body.rows : null;
+      if (!rows) { res.statusCode=400; return res.end(JSON.stringify({ ok:false, error:"rows (array) required" })); }
+
+      const clean = rows.map(r => ({ ...r, photo_urls: Array.isArray(r.photo_urls) ? r.photo_urls.filter(Boolean) : [] }));
+      const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } = process.env || {};
+      if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) { res.statusCode=500; return res.end(JSON.stringify({ ok:false, error:"missing SUPABASE envs" })); }
+
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/incoming_guests`, {
+        method: "POST",
+        headers: {
+          apikey: SUPABASE_SERVICE_ROLE_KEY,
+          Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+          "Content-Type": "application/json",
+          "Accept-Profile": "public",
+          "Content-Profile": "public",
+          Prefer: "return=representation,resolution=merge-duplicates"
+        },
+        body: JSON.stringify(clean)
+      });
+
+      const txt = await r.text();
+      try { console.log("insert-direct status", r.status, "body", txt.slice(0,200)); } catch {}
+      if (!r.ok) { res.statusCode=r.status; return res.end(JSON.stringify({ ok:false, error:"supabase insert failed", body: txt })); }
+
+      let data; try { data = JSON.parse(txt); } catch { data = []; }
+      res.statusCode=200; return res.end(JSON.stringify({ ok:true, inserted: Array.isArray(data)?data.length:0, rows: data }));
+    } catch (e) {
+      try { console.error("insert-direct crash", e && e.stack || e); } catch {}
+      res.statusCode=500; return res.end(JSON.stringify({ ok:false, error: (e && e.message) || "insert-direct error" }));
+    }
+  }
   // CORS
   if (sendCORS(req,res)) return;
 

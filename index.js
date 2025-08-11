@@ -76,6 +76,17 @@ function normalizeStayIdFreeform(raw){
   };
 }
 
+async function parseBody(req){
+  return await new Promise((resolve,reject)=>{
+    let b='';
+    req.on('data', c=> b+=c);
+    req.on('end', ()=>{
+      try{ resolve(b?JSON.parse(b):{}); }catch(e){ reject(e); }
+    });
+    req.on('error', reject);
+  });
+}
+
 module.exports = async (req, res) => {
   // CORS
   if (sendCORS(req,res)) return;
@@ -275,4 +286,71 @@ module.exports = async (req, res) => {
   res.statusCode = 404;
   res.setHeader('Content-Type','application/json');
   res.end(JSON.stringify({ ok:false, error:'Not Found' }));
+
+  // --- insert-direct: force table insert, return Supabase representation -------
+  if (req.method === 'POST' && url.pathname === '/insert-direct') {
+    try {
+      const body = await parseBody(req).catch(()=>({}));
+      const rows = Array.isArray(body?.rows) ? body.rows : [];
+      if (!rows.length) { res.status(400).json({ok:false,error:'rows (array) required'}); return; }
+
+      const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } = process.env || {};
+      if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+        res.status(500).json({ ok:false, error:'missing SUPABASE envs' }); return;
+      }
+
+      const clean = rows.map(r => ({
+        ...r,
+        photo_urls: Array.isArray(r.photo_urls) ? r.photo_urls.filter(Boolean) : []
+      }));
+
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/incoming_guests`, {
+        method: 'POST',
+        headers: {
+          apikey: SUPABASE_SERVICE_ROLE_KEY,
+          Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+          'Content-Type': 'application/json',
+          'Accept-Profile': 'public',
+          'Content-Profile': 'public',
+          // Ask PostgREST to echo inserted rows
+          Prefer: 'return=representation,resolution=merge-duplicates'
+        },
+        body: JSON.stringify(clean)
+      });
+
+      const txt = await r.text();
+      try { console.log('insert-direct status', r.status, 'body', txt.slice(0,400)); } catch {}
+      if (!r.ok) { res.status(r.status).json({ ok:false, error:'supabase insert failed', body: txt }); return; }
+
+      let data; try { data = JSON.parse(txt); } catch { data = []; }
+      res.status(200).json({ ok:true, inserted: Array.isArray(data)?data.length:0, rows: data });
+      return;
+    } catch (e) {
+      res.status(500).json({ ok:false, error: e.message || 'insert-direct error' }); return;
+    }
+  }
+
+  // --- recent: last N rows from incoming_guests --------------------------------
+  if (req.method === 'GET' && url.pathname === '/recent') {
+    try {
+      const limit = Math.max(1, Math.min(50, parseInt(url.searchParams.get('limit')||'10',10)));
+      const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } = process.env || {};
+      if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+        res.status(500).json({ ok:false, error:'missing SUPABASE envs' }); return;
+      }
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/incoming_guests?select=stay_id,first_name,last_name,passport_number,created_at&order=created_at.desc&limit=${limit}`, {
+        headers: {
+          apikey: SUPABASE_SERVICE_ROLE_KEY,
+          Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`
+        }
+      });
+      const txt = await r.text();
+      if (!r.ok) { res.status(r.status).json({ ok:false, error:'supabase recent failed', body: txt }); return; }
+      let data; try { data = JSON.parse(txt); } catch { data = []; }
+      res.status(200).json({ ok:true, rows: data });
+      return;
+    } catch (e) {
+      res.status(500).json({ ok:false, error: e.message || 'recent error' }); return;
+    }
+  }
 };

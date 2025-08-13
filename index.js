@@ -99,8 +99,8 @@ function normalizeStayIdFreeform(raw){
   let lastNameCanonical = lastParts.map(cap1).join('').replace(/[\s-]+/g,'');
   rooms = Array.from(new Set(rooms));
   rooms.sort((a,b)=>ROOM_ORDER.indexOf(a)-ROOM_ORDER.indexOf(b));
-  // FIX: force underscores between all components
-  const stay_id = [...rooms, lastNameCanonical].filter(Boolean).join('_').replace(/\s+/g, '_');
+  // Ensure stay_id always uses underscores: replace all whitespace with _, collapse multiple _, trim
+  const stay_id = [...rooms, lastNameCanonical].filter(Boolean).join('_').replace(/\s+/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '');
   return {
     input:String(raw),
     rooms_in: rooms.join(', '),
@@ -239,7 +239,6 @@ module.exports = async (req, res) => {
   if (req.method==='GET' && url.pathname==='/resolve'){
     const q = url.searchParams.get('stay_id') || '';
     const out = normalizeStayIdFreeform(q);
-    out.stay_id = out.stay_id.replace(/ /g, "_"); // <-- fix spaces
     res.setHeader('Content-Type','application/json'); 
     res.end(JSON.stringify(out)); 
     return;

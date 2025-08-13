@@ -239,7 +239,10 @@ module.exports = async (req, res) => {
   if (req.method==='GET' && url.pathname==='/resolve'){
     const q = url.searchParams.get('stay_id') || '';
     const out = normalizeStayIdFreeform(q);
-    res.setHeader('Content-Type','application/json'); res.end(JSON.stringify(out)); return;
+    out.stay_id = out.stay_id.replace(/ /g, "_"); // <-- fix spaces
+    res.setHeader('Content-Type','application/json'); 
+    res.end(JSON.stringify(out)); 
+    return;
   }
 
   // --- /upload (binary) --------------------------------------------------------

@@ -436,6 +436,122 @@ module.exports = async (req, res) => {
     return;
   }
 
+  // --- /merge-passport (direct PostgreSQL merge-or-insert) --------------------
+  if (req.method === 'POST' && url.pathname === '/merge-passport') {
+    const { Pool } = require('pg');
+    
+    const pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: { rejectUnauthorized: false }
+    });
+
+    try {
+      const body = await parseBody(req).catch(() => ({}));
+      const {
+        stay_id,
+        first_name,
+        middle_name,
+        last_name,
+        gender,
+        birthday,
+        passport_number,
+        nationality_alpha3,
+        photo_urls,
+        source
+      } = body;
+
+      if (!stay_id || !first_name) {
+        res.statusCode = 400;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ error: "stay_id and first_name are required" }));
+        return;
+      }
+
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+
+        // Try merge update first
+        const updateQuery = `
+          UPDATE incoming_guests
+          SET
+            last_name = COALESCE(NULLIF($1, ''), last_name),
+            middle_name = COALESCE(NULLIF($2, ''), middle_name),
+            gender = COALESCE(NULLIF($3, ''), gender),
+            birthday = COALESCE(NULLIF(NULLIF($4, '')::date, NULL), birthday),
+            passport_number = COALESCE(NULLIF($5, ''), passport_number),
+            nationality_alpha3 = COALESCE(NULLIF($6, ''), nationality_alpha3),
+            photo_urls = CASE
+              WHEN $7::text[] IS NOT NULL AND array_length($7::text[], 1) > 0
+              THEN $7::text[]
+              ELSE photo_urls
+            END,
+            source = COALESCE(NULLIF($8, ''), source)
+          WHERE stay_id = $9
+            AND lower(first_name) = lower($10)
+        `;
+        const updateValues = [
+          last_name || "",
+          middle_name || "",
+          gender || "",
+          birthday || "",
+          passport_number || "",
+          nationality_alpha3 || "",
+          photo_urls && photo_urls.length > 0 ? photo_urls : null,
+          source || "coco_gpt_merge",
+          stay_id,
+          first_name
+        ];
+        const updateResult = await client.query(updateQuery, updateValues);
+
+        // If no update happened, insert new row
+        if (updateResult.rowCount === 0) {
+          const insertQuery = `
+            INSERT INTO incoming_guests (
+              stay_id, first_name, middle_name, last_name, gender,
+              birthday, passport_number, nationality_alpha3, photo_urls, source
+            )
+            VALUES ($1, $2, $3, $4, $5, NULLIF($6, '')::date, $7, $8, $9, $10)
+          `;
+          await client.query(insertQuery, [
+            stay_id,
+            first_name,
+            middle_name || "",
+            last_name || "",
+            gender || "",
+            birthday || "",
+            passport_number || "",
+            nationality_alpha3 || "",
+            photo_urls && photo_urls.length > 0 ? photo_urls : null,
+            source || "coco_gpt_insert"
+          ]);
+        }
+
+        await client.query("COMMIT");
+
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({
+          success: true,
+          action: updateResult.rowCount > 0 ? "merged" : "inserted"
+        }));
+      } catch (err) {
+        await client.query("ROLLBACK");
+        console.error(err);
+        res.statusCode = 500;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ error: err.message }));
+      } finally {
+        client.release();
+      }
+    } catch (err) {
+      console.error(err);
+      res.statusCode = 500;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
   // --- /export (tab-delimited 7 cols, header) ---------------------------------
   if (req.method==='GET' && url.pathname==='/export'){
     const stay_id = url.searchParams.get('stay_id');

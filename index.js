@@ -430,3 +430,54 @@ module.exports = async (req, res) => {
   res.setHeader('Content-Type','application/json');
   res.end(JSON.stringify({ ok:false, error:'Not Found' }));
 };
+
+
+// --- Automatic merge_passport fallback --------------------------------------
+async function handlePassportUpsertOrMerge(passportData) {
+  // Step 1: Try upsert
+  const upsertResp = await fetchJson(`${PASSPORT_PROXY_BASE_URL}/upsertPassport`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rows: [passportData] })
+  });
+
+  if (!upsertResp.ok) {
+    console.error("Upsert failed", upsertResp.status, upsertResp.text);
+    return upsertResp;
+  }
+
+  // Step 2: If no insert happened, call merge_passport
+  if (upsertResp.json && upsertResp.json.inserted === 0) {
+    console.log(`No new row inserted for stay_id=${passportData.stay_id}, first_name=${passportData.first_name}. Merging...`);
+
+    const mergeResp = await fetchJson(`${process.env.SUPABASE_URL}/rest/v1/rpc/merge_passport`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': process.env.SUPABASE_SERVICE_KEY,
+        'Authorization': `Bearer ${process.env.SUPABASE_SERVICE_KEY}`
+      },
+      body: JSON.stringify({
+        p_stay_id: passportData.stay_id,
+        p_first_name: passportData.first_name,
+        p_middle_name: passportData.middle_name || '',
+        p_last_name: passportData.last_name || '',
+        p_gender: passportData.gender || '',
+        p_birthday: passportData.birthday || null,
+        p_passport_number: passportData.passport_number || '',
+        p_nationality_alpha3: passportData.nationality_alpha3 || '',
+        p_photo_urls: passportData.photo_urls || [],
+        p_source: passportData.source || ''
+      })
+    });
+
+    if (!mergeResp.ok) {
+      console.error("Merge failed", mergeResp.status, mergeResp.text);
+    } else {
+      console.log(`Merge completed for ${passportData.first_name} (${passportData.stay_id})`);
+    }
+    return mergeResp;
+  }
+
+  return upsertResp;
+}

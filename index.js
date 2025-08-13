@@ -304,21 +304,75 @@ module.exports = async (req, res) => {
       return; 
     }
 
-    // fallback table insert with UPSERT (ignore duplicates)
-    const tbl = await fetch(`${SUPABASE_URL}/rest/v1/incoming_guests`, {
-      method:'POST', headers:{ ...baseHeaders, Prefer:'return=representation,resolution=ignore-duplicates' }, body: JSON.stringify(rows)
-    });
-    const txt = await tbl.text();
-    if (!tbl.ok){ res.statusCode=tbl.status; res.end(JSON.stringify({ok:false,status:tbl.status,error:txt,via:'table'})); return; }
-
-    // detect duplicates from PostgREST payload (if any)
-    let inserted=0;
-    try{
-      const js = JSON.parse(txt);
-      inserted = Array.isArray(js)? js.length : 0;
-    }catch{}
+    // Manual upsert logic: check for existing records, update if found, insert if not
+    let inserted = 0, updated = 0, skipped = 0;
+    const results = [];
+    
+    for (const row of rows) {
+      if (!row.stay_id || !row.first_name) {
+        skipped++;
+        continue;
+      }
+      
+      // Check if record exists
+      const checkUrl = `${SUPABASE_URL}/rest/v1/incoming_guests?stay_id=eq.${encodeURIComponent(row.stay_id)}&first_name=ilike.${encodeURIComponent(row.first_name)}&limit=1`;
+      const check = await fetch(checkUrl, { headers: baseHeaders });
+      
+      if (!check.ok) {
+        skipped++;
+        continue;
+      }
+      
+      const existing = await check.json();
+      
+      if (existing && existing.length > 0) {
+        // Record exists - update it
+        const existingId = existing[0].id;
+        const updateUrl = `${SUPABASE_URL}/rest/v1/incoming_guests?id=eq.${existingId}`;
+        const updateData = { ...row };
+        delete updateData.stay_id; // Don't update the key fields
+        delete updateData.first_name;
+        
+        const updateResp = await fetch(updateUrl, {
+          method: 'PATCH',
+          headers: { ...baseHeaders, Prefer: 'return=representation' },
+          body: JSON.stringify(updateData)
+        });
+        
+        if (updateResp.ok) {
+          const updatedRecord = await updateResp.json();
+          results.push(...(Array.isArray(updatedRecord) ? updatedRecord : [updatedRecord]));
+          updated++;
+        } else {
+          skipped++;
+        }
+      } else {
+        // Record doesn't exist - insert it
+        const insertResp = await fetch(`${SUPABASE_URL}/rest/v1/incoming_guests`, {
+          method: 'POST',
+          headers: { ...baseHeaders, Prefer: 'return=representation' },
+          body: JSON.stringify([row])
+        });
+        
+        if (insertResp.ok) {
+          const insertedRecord = await insertResp.json();
+          results.push(...(Array.isArray(insertedRecord) ? insertedRecord : [insertedRecord]));
+          inserted++;
+        } else {
+          skipped++;
+        }
+      }
+    }
+    
     res.setHeader('Content-Type','application/json');
-    res.end(JSON.stringify({ ok:true, via:'table', inserted, skipped: [] }));
+    res.end(JSON.stringify({ 
+      ok: true, 
+      via: 'table-manual-upsert', 
+      inserted, 
+      updated, 
+      skipped, 
+      rows: results 
+    }));
     return;
   }
 

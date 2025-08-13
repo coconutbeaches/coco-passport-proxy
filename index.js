@@ -304,9 +304,9 @@ module.exports = async (req, res) => {
       return; 
     }
 
-    // fallback table insert with UPSERT (merge duplicates)
+    // fallback table insert with UPSERT (ignore duplicates)
     const tbl = await fetch(`${SUPABASE_URL}/rest/v1/incoming_guests`, {
-      method:'POST', headers:{ ...baseHeaders, Prefer:'return=representation,resolution=merge-duplicates' }, body: JSON.stringify(rows)
+      method:'POST', headers:{ ...baseHeaders, Prefer:'return=representation,resolution=ignore-duplicates' }, body: JSON.stringify(rows)
     });
     const txt = await tbl.text();
     if (!tbl.ok){ res.statusCode=tbl.status; res.end(JSON.stringify({ok:false,status:tbl.status,error:txt,via:'table'})); return; }

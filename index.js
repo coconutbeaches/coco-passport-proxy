@@ -99,7 +99,8 @@ function normalizeStayIdFreeform(raw){
   let lastNameCanonical = lastParts.map(cap1).join('').replace(/[\s-]+/g,'');
   rooms = Array.from(new Set(rooms));
   rooms.sort((a,b)=>ROOM_ORDER.indexOf(a)-ROOM_ORDER.indexOf(b));
-  const stay_id = [...rooms, lastNameCanonical].filter(Boolean).join('_');
+  // FIX: force underscores between all components
+  const stay_id = [...rooms, lastNameCanonical].filter(Boolean).join('_').replace(/\s+/g, '_');
   return {
     input:String(raw),
     rooms_in: rooms.join(', '),
@@ -266,6 +267,10 @@ module.exports = async (req, res) => {
       if (!stay_id || !imgUrl){ res.statusCode=400; res.end(JSON.stringify({ok:false,error:'stay_id and url required'})); return; }
       const safeName=(filename||`${crypto.randomUUID()}.jpg`).replace(/[^A-Za-z0-9._-]/g,'_');
       const objectPath = `passports/${stay_id}/${safeName}`;
+      
+      // Honor SKIP_UPLOADS=1 for CI/testing - bypass Supabase storage
+      if (process.env.SKIP_UPLOADS === '1'){ res.setHeader('Content-Type','application/json'); res.end(JSON.stringify({ok:true, object_path:objectPath, skipped:true})); return; }
+      
       const fr = await fetch(imgUrl); if (!fr.ok){ const tt = await fr.text(); res.statusCode=400; res.end(JSON.stringify({ok:false,error:`fetch image failed: ${fr.status}`, body:tt})); return; }
       const buf = Buffer.from(await fr.arrayBuffer());
       const put = await fetch(`${SUPABASE_URL}/storage/v1/object/${encodeURIComponent(objectPath)}`, {

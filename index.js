@@ -432,6 +432,56 @@ module.exports = async (req, res) => {
 };
 
 
+async function mergeOrInsertPassport(db, newGuest) {
+  const { stay_id, first_name, last_name, gender, birthday, passport_number, nationality_alpha3, photo_urls, source } = newGuest;
+
+  // Look for an existing row with same stay_id + first_name (case-insensitive)
+  const existing = await db.query(
+    `SELECT * FROM incoming_guests
+     WHERE stay_id = $1 AND lower(first_name) = lower($2)
+     LIMIT 1`,
+    [stay_id.trim(), first_name.trim()]
+  );
+
+  if (existing.rows.length > 0) {
+    const ex = existing.rows[0];
+    if (!ex.passport_number) {
+      // Merge instead of insert
+      await db.query(`
+        UPDATE incoming_guests t
+        SET
+          last_name = COALESCE(NULLIF($1, ''), t.last_name),
+          middle_name = COALESCE(NULLIF($2, ''), t.middle_name),
+          gender = COALESCE(NULLIF($3, ''), t.gender),
+          birthday = COALESCE(NULLIF($4, '')::date, t.birthday),
+          passport_number = COALESCE(NULLIF($5, ''), t.passport_number),
+          nationality_alpha3 = COALESCE(NULLIF($6, ''), t.nationality_alpha3),
+          photo_urls = CASE WHEN $7::jsonb IS NOT NULL AND jsonb_array_length($7::jsonb) > 0 THEN $7::jsonb ELSE t.photo_urls END,
+          source = COALESCE(NULLIF($8, ''), t.source)
+        WHERE t.id = $9
+      `, [
+        last_name, newGuest.middle_name || '',
+        gender, birthday,
+        passport_number, nationality_alpha3,
+        JSON.stringify(photo_urls || []), source,
+        ex.id
+      ]);
+      console.log(`Merged passport into existing guest: ${first_name} (${stay_id})`);
+      return;
+    }
+  }
+
+  // No match or passport already present — insert new row
+  await db.query(`
+    INSERT INTO incoming_guests (stay_id, first_name, middle_name, last_name, gender, birthday, passport_number, nationality_alpha3, photo_urls, source)
+    VALUES ($1, $2, $3, $4, $5, NULLIF($6, '')::date, $7, $8, $9::jsonb, $10)
+  `, [
+    stay_id, first_name, newGuest.middle_name || '', last_name,
+    gender, birthday, passport_number, nationality_alpha3,
+    JSON.stringify(photo_urls || []), source
+  ]);
+}
+
 // --- Automatic merge_passport fallback --------------------------------------
 async function handlePassportUpsertOrMerge(passportData) {
   // Step 1: Try upsert

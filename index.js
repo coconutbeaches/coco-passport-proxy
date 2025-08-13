@@ -236,19 +236,19 @@ module.exports = async (req, res) => {
     const rows = Array.isArray(body.rows)? body.rows : [];
     if (!rows.length){ res.setHeader('Content-Type','application/json'); res.statusCode=400; res.end(JSON.stringify({ok:false,error:'rows (array) required'})); return; }
 
-    // RPC try (temporarily disabled for upsert testing)
-    // const rpc = await fetch(`${SUPABASE_URL}/rest/v1/rpc/insert_incoming_guests`, { method:'POST', headers: baseHeaders, body: JSON.stringify(body) });
-    // if (rpc.ok){ 
-    //   const text = await rpc.text(); 
-    //   // Wrap RPC response in iOS-expected envelope format
-    //   let rpcData;
-    //   try { rpcData = JSON.parse(text || '[]'); } catch { rpcData = []; }
-    //   const inserted = Array.isArray(rpcData) ? rpcData.length : 0;
-    //   res.setHeader('Content-Type','application/json'); 
-    //   res.statusCode=200; 
-    //   res.end(JSON.stringify({ ok:true, via:'rpc', inserted, rows: rpcData })); 
-    //   return; 
-    // }
+    // RPC try first
+    const rpc = await fetch(`${SUPABASE_URL}/rest/v1/rpc/insert_incoming_guests`, { method:'POST', headers: baseHeaders, body: JSON.stringify(body) });
+    if (rpc.ok){ 
+      const text = await rpc.text(); 
+      // Wrap RPC response in iOS-expected envelope format
+      let rpcData;
+      try { rpcData = JSON.parse(text || '[]'); } catch { rpcData = []; }
+      const inserted = Array.isArray(rpcData) ? rpcData.length : 0;
+      res.setHeader('Content-Type','application/json'); 
+      res.statusCode=200; 
+      res.end(JSON.stringify({ ok:true, via:'rpc', inserted, rows: rpcData })); 
+      return; 
+    }
 
     // Manual upsert logic: check for existing records, update if found, insert if not
     let inserted = 0, updated = 0, skipped = 0;

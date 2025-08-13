@@ -284,7 +284,7 @@ module.exports = async (req, res) => {
     }catch(e){ res.statusCode=500; res.end(JSON.stringify({ok:false,error:e.message||'upload-url error'})); return; }
   }
 
-  // --- /insert (RPC first, fallback table) ------------------------------------
+  // --- /insert (RPC first, fallback table with upsert) ------------------------------------
   if (req.method==='POST' && url.pathname==='/insert'){
     const body = await parseBody(req).catch(()=>({}));
     const rows = Array.isArray(body.rows)? body.rows : [];
@@ -304,21 +304,21 @@ module.exports = async (req, res) => {
       return; 
     }
 
-    // fallback table insert
+    // fallback table insert with UPSERT (merge duplicates)
     const tbl = await fetch(`${SUPABASE_URL}/rest/v1/incoming_guests`, {
-      method:'POST', headers:{ ...baseHeaders, Prefer:'return=representation' }, body: JSON.stringify(rows)
+      method:'POST', headers:{ ...baseHeaders, Prefer:'return=representation,resolution=merge-duplicates' }, body: JSON.stringify(rows)
     });
     const txt = await tbl.text();
     if (!tbl.ok){ res.statusCode=tbl.status; res.end(JSON.stringify({ok:false,status:tbl.status,error:txt,via:'table'})); return; }
 
     // detect duplicates from PostgREST payload (if any)
-    let inserted=0, skipped=[];
+    let inserted=0;
     try{
       const js = JSON.parse(txt);
       inserted = Array.isArray(js)? js.length : 0;
     }catch{}
     res.setHeader('Content-Type','application/json');
-    res.end(JSON.stringify({ ok:true, via:'table', inserted, skipped }));
+    res.end(JSON.stringify({ ok:true, via:'table', inserted, skipped: [] }));
     return;
   }
 

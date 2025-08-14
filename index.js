@@ -658,7 +658,9 @@ module.exports = async (req, res) => {
             
             items.push({
               rooms: room || house || '',
+              full_name: item.Name,
               last: item.Name.split(' ').pop(), // Use last word as last name
+              first: item.Name.split(' ')[0], // Use first word as first name
               guest_last: item.Name.split(' ').pop(),
               check_in: item.Arrive || null,
               check_out: item.Depart || null,
@@ -698,27 +700,26 @@ module.exports = async (req, res) => {
         guestsByLastName[cleanLastName].push(row);
       });
 
-      const rows = [];
-      Object.entries(guestsByLastName).forEach(([cleanLastName, guestRows]) => {
-        if (guestRows.length === 1) {
-          // Single guest - use existing stay_id but fix last name spaces
-          const row = guestRows[0];
+      const guestRows = [];
+      Object.entries(guestsByLastName).forEach(([cleanLastName, guestRows_temp]) => {
+        if (guestRows_temp.length === 1) {
+          // Single guest - create one guest record
+          const row = guestRows_temp[0];
           const roomsPart = row.rooms.join('_');
           const stay_id = roomsPart ? `${roomsPart}_${cleanLastName}` : cleanLastName;
           
-          rows.push({
+          guestRows.push({
             stay_id,
-            rooms: row.rooms,
-            check_in: row.original_item.check_in || null,
-            check_out: row.original_item.check_out || null,
-            expected_guest_count: row.original_item.expected_guest_count ?? row.original_item.guests ?? null
+            first_name: row.original_item.first || row.original_item.full_name?.split(' ')[0] || '',
+            last_name: cleanLastName,
+            source: 'tokeet_upsert'
           });
         } else {
-          // Multiple guests with same last name - merge rooms
+          // Multiple guests with same last name - merge rooms, create one guest record
           const allRooms = [];
           let sampleItem = null;
           
-          guestRows.forEach(row => {
+          guestRows_temp.forEach(row => {
             allRooms.push(...row.rooms);
             if (!sampleItem) sampleItem = row.original_item;
           });
@@ -729,25 +730,26 @@ module.exports = async (req, res) => {
           
           const stay_id = uniqueRooms.length ? `${uniqueRooms.join('_')}_${cleanLastName}` : cleanLastName;
           
-          rows.push({
+          guestRows.push({
             stay_id,
-            rooms: uniqueRooms,
-            check_in: sampleItem.check_in || null,
-            check_out: sampleItem.check_out || null,
-            expected_guest_count: sampleItem.expected_guest_count ?? sampleItem.guests ?? null
+            first_name: sampleItem.first || sampleItem.full_name?.split(' ')[0] || '',
+            last_name: cleanLastName,
+            source: 'tokeet_upsert'
           });
         }
       });
 
-      if (!rows.length){ res.setHeader('Content-Type','application/json'); res.end(JSON.stringify({ ok:true, upserted:0 })); return; }
+      if (!guestRows.length){ res.setHeader('Content-Type','application/json'); res.end(JSON.stringify({ ok:true, upserted:0 })); return; }
 
-      const put = await fetch(`${SUPABASE_URL}/rest/v1/stays_preseed`, {
-        method:'POST', headers:{ ...baseHeaders, Prefer:'resolution=merge-duplicates' }, body: JSON.stringify(rows)
+      // Insert into incoming_guests table instead of stays_preseed
+      const put = await fetch(`${SUPABASE_URL}/rest/v1/incoming_guests`, {
+        method:'POST', headers:{ ...baseHeaders, Prefer:'resolution=merge-duplicates' }, body: JSON.stringify(guestRows)
       });
       const txt = await put.text();
       if (!put.ok){ res.statusCode=put.status; res.end(JSON.stringify({ ok:false, error:'upsert failed', body:txt })); return; }
-      res.setHeader('Content-Type','application/json'); res.end(JSON.stringify({ ok:true, upserted: rows.length })); return;
+      res.setHeader('Content-Type','application/json'); res.end(JSON.stringify({ ok:true, upserted: guestRows.length })); return;
     }catch(e){ res.statusCode=500; res.end(JSON.stringify({ ok:false, error:e.message||'tokeet-upsert error' })); return; }
+  }
   }
 
   // --- /tokeet-upsert-rows (DIRECT preseed) -----------------------------------

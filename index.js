@@ -666,7 +666,17 @@ module.exports = async (req, res) => {
               check_out: item.Depart || null,
               guests: parseInt(item.Adults || '0') + parseInt(item.Children || '0') || null,
               expected_guest_count: parseInt(item.Adults || '0') + parseInt(item.Children || '0') || null
-            });
+              // Additional CSV field mappings
+              email: item.Email || "",
+              phone: item.Telephone || "",
+              rental_unit: item.Rental || "",
+              nights: parseInt(item.Nights || "0") || null,
+              booking_id: item["Booking ID"] || "",
+              booking_channel: item.Source || "",
+              adults: parseInt(item.Adults || "0") || 0,
+              children: parseInt(item.Children || "0") || 0,
+              currency: item.Currency || "",
+              total_cost: parseFloat(item["Total Cost"] || "0") || 0            });
           }
         }
       } else {
@@ -710,9 +720,19 @@ module.exports = async (req, res) => {
           
           guestRows.push({
             stay_id,
-            first_name: row.original_item.first || row.original_item.full_name?.split(' ')[0] || '',
+            first_name: cap1(row.original_item.first) || cap1(row.original_item.full_name?.split(" ")[0]) || "",
             last_name: cleanLastName,
-            source: 'tokeet_upsert'
+            email: row.original_item.email || "",
+            phone: row.original_item.phone || "",
+            rental_unit: row.original_item.rental_unit || "",
+            check_out: row.original_item.check_out || null,
+            nights: row.original_item.nights || null,
+            booking_id: row.original_item.booking_id || "",
+            booking_channel: row.original_item.booking_channel || "",
+            adults: row.original_item.adults || 0,
+            children: row.original_item.children || 0,
+            currency: row.original_item.currency || "",
+            total_cost: row.original_item.total_cost || 0,            source: 'tokeet_upsert'
           });
         } else {
           // Multiple guests with same last name - merge rooms, create one guest record
@@ -732,9 +752,19 @@ module.exports = async (req, res) => {
           
           guestRows.push({
             stay_id,
-            first_name: sampleItem.first || sampleItem.full_name?.split(' ')[0] || '',
+            first_name: cap1(sampleItem.first) || cap1(sampleItem.full_name?.split(" ")[0]) || "",
             last_name: cleanLastName,
-            source: 'tokeet_upsert'
+            email: row.original_item.email || "",
+            phone: row.original_item.phone || "",
+            rental_unit: row.original_item.rental_unit || "",
+            check_out: row.original_item.check_out || null,
+            nights: row.original_item.nights || null,
+            booking_id: row.original_item.booking_id || "",
+            booking_channel: row.original_item.booking_channel || "",
+            adults: row.original_item.adults || 0,
+            children: row.original_item.children || 0,
+            currency: row.original_item.currency || "",
+            total_cost: row.original_item.total_cost || 0,            source: 'tokeet_upsert'
           });
         }
       });

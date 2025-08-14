@@ -706,12 +706,12 @@ module.exports = async (req, res) => {
           // Single guest - create one guest record
           const row = guestRows_temp[0];
           const roomsPart = row.rooms.join('_');
-          const stay_id = roomsPart ? `${roomsPart}_${cleanLastName}` : cleanLastName;
+          const stay_id = roomsPart ? `${roomsPart}_${row.last_name_canonical}` : row.last_name_canonical;
           
           guestRows.push({
             stay_id,
             first_name: cap1(row.original_item.first) || cap1(row.original_item.full_name?.split(" ")[0]) || "",
-            last_name: cleanLastName,
+            last_name: row.last_name_canonical,
             source: 'tokeet_upsert'
           });
         } else {
@@ -728,12 +728,12 @@ module.exports = async (req, res) => {
           const uniqueRooms = Array.from(new Set(allRooms));
           uniqueRooms.sort((a,b) => ROOM_ORDER.indexOf(a) - ROOM_ORDER.indexOf(b));
           
-          const stay_id = uniqueRooms.length ? `${uniqueRooms.join('_')}_${cleanLastName}` : cleanLastName;
+          const stay_id = uniqueRooms.length ? `${uniqueRooms.join("_")}_${guestRows_temp[0].last_name_canonical}` : guestRows_temp[0].last_name_canonical;
           
           guestRows.push({
             stay_id,
             first_name: cap1(sampleItem.first) || cap1(sampleItem.full_name?.split(" ")[0]) || "",
-            last_name: cleanLastName,
+            last_name: guestRows_temp[0].last_name_canonical,
             source: 'tokeet_upsert'
           });
         }

@@ -230,7 +230,7 @@ describe('CocoGPT Batch Passport Processing', () => {
       })
       .expect(400);
 
-    expect(response.body.error).toBe('stay_id and passports array are required');
+    expect(response.body.error).toBe('passports array is required');
     expect(response.body.expected_format).toBeDefined();
   });
 
@@ -243,7 +243,34 @@ describe('CocoGPT Batch Passport Processing', () => {
       })
       .expect(400);
 
-    expect(response.body.error).toBe('stay_id and passports array are required');
+    expect(response.body.error).toBe('passports array is required');
+  });
+
+  test('should handle missing stay_id gracefully', async () => {
+    const testPayload = {
+      // No stay_id provided
+      passports: [
+        {
+          first_name: 'TestUser',
+          last_name: 'NoStayId',
+          passport_number: 'P123456789',
+          nationality_alpha3: 'DEU'
+        }
+      ]
+    };
+
+    const response = await request(createTestApp())
+      .post('/coco-gpt-batch-passport')
+      .send(testPayload)
+      .expect(200);
+
+    expect(response.body.summary.inserted).toBe(1);
+    expect(response.body.summary.errors).toBe(0);
+    
+    // Verify that a fallback stay_id was generated in the call
+    const fetchCall = global.fetch.mock.calls[0];
+    const requestBody = JSON.parse(fetchCall[1].body);
+    expect(requestBody.stay_id).toMatch(/^unknown_\d+$/); // Should match pattern unknown_{timestamp}
   });
 
   test('should handle merge-passport endpoint failures', async () => {

@@ -250,7 +250,8 @@ function parseMRZ(mrzString) {
     return { valid: false, error: 'Invalid MRZ string' };
   }
   
-  const mrz = mrzString.trim().replace(/\s+/g, '');
+  // Preserve newlines but normalize other whitespace - critical for format detection
+  const mrz = mrzString.trim().replace(/[ \t\r]+/g, '');
   
   // Basic MRZ validation patterns
   const mrzPatterns = {
@@ -926,26 +927,37 @@ module.exports = async (req, res) => {
       const body = await parseBody(req).catch(() => ({}));
       const { stay_id, passports } = body;
       
-      if (!stay_id || !Array.isArray(passports) || passports.length === 0) {
+      // Be more permissive with stay_id - auto-normalize if provided, allow empty for basic processing
+      let normalizedStayId = stay_id;
+      if (stay_id && typeof stay_id === 'string') {
+        const normalized = normalizeStayIdFreeform(stay_id);
+        if (normalized.stay_id) {
+          normalizedStayId = normalized.stay_id;
+        }
+        // If normalization fails, keep original - let the database decide
+      }
+      
+      if (!Array.isArray(passports) || passports.length === 0) {
         res.statusCode = 400;
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({ 
-          error: "stay_id and passports array are required",
+          error: "passports array is required",
+          note: "photo_urls are optional - you can omit them or pass local file paths (they will be filtered out)",
           expected_format: {
-            stay_id: "B7_Kislinger",
+            stay_id: "B7_Kislinger (optional - fallback generated if missing)",
             passports: [
               {
-                first_name: "Stefan",
+                first_name: "Stefan (required)",
                 last_name: "Kislinger", 
                 passport_number: "P123456",
                 nationality_alpha3: "DEU",
-                mrz_full: "P<DEUKISLINGER<<STEFAN<<<<<<<<<<<<<<<<<<<<<",
+                mrz_full: "P<DEUKISLINGER<<STEFAN<<<<<<<<<<<<<<<<<<<<<<",
                 ocr_confidence: 0.95,
-                photo_urls: ["https://example.com/photo1.jpg"]
+                photo_urls: ["https://example.com/photo1.jpg (optional - local paths filtered out)"]
               }
             ]
           }
-        })); 
+        }));
         return; 
       }
       
@@ -957,22 +969,10 @@ module.exports = async (req, res) => {
         const passport = passports[i];
         
         try {
-          // Validate required fields for each passport
-          if (!passport.first_name) {
-            results.push({
-              index: i,
-              status: 'error',
-              error: 'first_name is required',
-              passport: passport
-            });
-            errors++;
-            continue;
-          }
-          
           // Enhanced validation and processing
           const warnings = [];
           
-          // Validate and parse MRZ if provided
+          // Validate and parse MRZ if provided - do this FIRST to extract names
           let mrzData = null;
           let mrzHash = passport.mrz_hash;
           if (passport.mrz_full) {
@@ -993,6 +993,22 @@ module.exports = async (req, res) => {
             }
           }
           
+          // Extract first_name from MRZ if not provided directly
+          const firstName = passport.first_name || (mrzData?.valid ? mrzData.firstName : null);
+          const lastName = passport.last_name || (mrzData?.valid ? mrzData.lastName : null);
+          
+          // Validate that we have at least a first name (from input or MRZ)
+          if (!firstName) {
+            results.push({
+              index: i,
+              status: 'error',
+              error: 'first_name is required (either directly provided or extractable from MRZ)',
+              passport: passport
+            });
+            errors++;
+            continue;
+          }
+          
           // Validate OCR confidence
           let ocrValidation = null;
           if (passport.ocr_confidence !== null && passport.ocr_confidence !== undefined) {
@@ -1004,12 +1020,13 @@ module.exports = async (req, res) => {
             }
           }
           
-          // Prepare passport data with stay_id and source
+          // Prepare passport data with normalized stay_id and source
+          // Note: photo_urls are optional - CocoGPT can process passports without needing to upload images
           const passportData = {
-            stay_id,
-            first_name: passport.first_name,
+            stay_id: normalizedStayId || stay_id || `unknown_${Date.now()}`, // Fallback for missing stay_id
+            first_name: firstName, // Use extracted name from MRZ if available
             middle_name: passport.middle_name || '',
-            last_name: passport.last_name || '',
+            last_name: lastName || '', // Use extracted name from MRZ if available
             gender: passport.gender || '',
             birthday: passport.birthday || '',
             passport_number: passport.passport_number || '',
@@ -1020,7 +1037,11 @@ module.exports = async (req, res) => {
             mrz_full: passport.mrz_full || '',
             mrz_hash: mrzHash || '',
             ocr_confidence: ocrValidation?.normalized || passport.ocr_confidence || null,
-            photo_urls: Array.isArray(passport.photo_urls) ? passport.photo_urls : [],
+            photo_urls: Array.isArray(passport.photo_urls) ? passport.photo_urls.filter(url => {
+              // Only include URLs that are accessible (start with http/https)
+              // Skip local file paths like /mnt/data/...
+              return typeof url === 'string' && url.match(/^https?:\/\//)
+            }) : [],
             source: 'coco_gpt_batch'
           };
           
@@ -1049,7 +1070,7 @@ module.exports = async (req, res) => {
               index: i,
               status: 'success',
               action: mergeResult.action,
-              first_name: passport.first_name,
+              first_name: firstName, // Use extracted name
               passport_number: passport.passport_number
             });
             
@@ -1084,9 +1105,20 @@ module.exports = async (req, res) => {
       
       for (const result of successfulPassports) {
         const originalPassport = passports[result.index];
-        const firstName = originalPassport.first_name || '';
+        
+        // Extract names from MRZ if available, fallback to original input
+        let firstName = originalPassport.first_name || '';
+        let lastName = originalPassport.last_name || '';
+        
+        if (originalPassport.mrz_full) {
+          const mrzData = parseMRZ(originalPassport.mrz_full);
+          if (mrzData.valid) {
+            firstName = mrzData.firstName || firstName;
+            lastName = mrzData.lastName || lastName;
+          }
+        }
+        
         const middleName = originalPassport.middle_name || '';
-        const lastName = originalPassport.last_name || '';
         const gender = originalPassport.gender || '';
         const passportNumber = originalPassport.passport_number || '';
         const nationality = originalPassport.nationality_alpha3 || '';

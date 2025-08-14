@@ -611,7 +611,67 @@ module.exports = async (req, res) => {
       const feed = await fetchJson(feedUrl);
       if (!feed.ok){ res.statusCode=feed.status||500; res.end(JSON.stringify({ ok:false, error:'fetch feed failed', body: feed.text })); return; }
 
-      const items = Array.isArray(feed.json) ? feed.json : (feed.json?.items || []);
+      let items = [];
+      
+      // Check if response is JSON or CSV
+      if (feed.json && Array.isArray(feed.json)) {
+        // JSON format (original logic)
+        items = feed.json;
+      } else if (feed.text && feed.text.includes('"Name"')) {
+        // CSV format - parse it
+        const csvLines = feed.text.split('\n').filter(line => line.trim());
+        const headers = csvLines[0].split(',').map(h => h.replace(/"/g, '').trim());
+        
+        for (let i = 1; i < csvLines.length; i++) {
+          const values = [];
+          let current = '';
+          let inQuotes = false;
+          
+          // Simple CSV parser that handles quoted values
+          for (let char of csvLines[i]) {
+            if (char === '"') {
+              inQuotes = !inQuotes;
+            } else if (char === ',' && !inQuotes) {
+              values.push(current.trim());
+              current = '';
+            } else {
+              current += char;
+            }
+          }
+          values.push(current.trim()); // Add the last value
+          
+          // Create item object from CSV row
+          const item = {};
+          headers.forEach((header, index) => {
+            item[header] = values[index] || '';
+          });
+          
+          // Map CSV fields to expected format
+          if (item.Name && item.Rental) {
+            // Extract room from Rental field like "A4 · 1 Bedroom / 1 Bath at Coconut Beach Bungalows (A4)"
+            const roomMatch = item.Rental.match(/\(([AB]\d+)\)/) || item.Rental.match(/^([AB]\d+)/);
+            const room = roomMatch ? roomMatch[1] : '';
+            
+            // Extract room from house names like "Beach House", "Jungle House", etc.
+            const houseMatch = item.Rental.match(/(Beach House|Jungle House|Double House|New House)/);
+            const house = houseMatch ? houseMatch[1] : '';
+            
+            items.push({
+              rooms: room || house || '',
+              last: item.Name.split(' ').pop(), // Use last word as last name
+              guest_last: item.Name.split(' ').pop(),
+              check_in: item.Arrive || null,
+              check_out: item.Depart || null,
+              guests: parseInt(item.Adults || '0') + parseInt(item.Children || '0') || null,
+              expected_guest_count: parseInt(item.Adults || '0') + parseInt(item.Children || '0') || null
+            });
+          }
+        }
+      } else {
+        // Fallback - try to use existing JSON structure
+        items = feed.json?.items || [];
+      }
+
       const rawRows = [];
       
       // First pass: normalize each item individually

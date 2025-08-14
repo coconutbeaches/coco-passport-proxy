@@ -706,34 +706,36 @@ module.exports = async (req, res) => {
           // Single guest - create one guest record
           const row = guestRows_temp[0];
           const roomsPart = row.rooms.join('_');
-          const stay_id = roomsPart ? `${roomsPart}_${cleanLastName}` : cleanLastName;
+          const stay_id = roomsPart ? `${roomsPart}_${row.last_name_canonical}` : row.last_name_canonical;
           
           guestRows.push({
             stay_id,
             first_name: row.original_item.first || row.original_item.full_name?.split(' ')[0] || '',
-            last_name: cleanLastName,
+            last_name: row.last_name_canonical, // Use properly capitalized name
             source: 'tokeet_upsert'
           });
         } else {
           // Multiple guests with same last name - merge rooms, create one guest record
           const allRooms = [];
           let sampleItem = null;
+          let properLastName = null;
           
           guestRows_temp.forEach(row => {
             allRooms.push(...row.rooms);
             if (!sampleItem) sampleItem = row.original_item;
+            if (!properLastName) properLastName = row.last_name_canonical;
           });
           
           // Remove duplicates and sort by room order
           const uniqueRooms = Array.from(new Set(allRooms));
           uniqueRooms.sort((a,b) => ROOM_ORDER.indexOf(a) - ROOM_ORDER.indexOf(b));
           
-          const stay_id = uniqueRooms.length ? `${uniqueRooms.join('_')}_${cleanLastName}` : cleanLastName;
+          const stay_id = uniqueRooms.length ? `${uniqueRooms.join('_')}_${properLastName}` : properLastName;
           
           guestRows.push({
             stay_id,
             first_name: sampleItem.first || sampleItem.full_name?.split(' ')[0] || '',
-            last_name: cleanLastName,
+            last_name: properLastName, // Use properly capitalized name
             source: 'tokeet_upsert'
           });
         }

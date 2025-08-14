@@ -750,7 +750,6 @@ module.exports = async (req, res) => {
       res.setHeader('Content-Type','application/json'); res.end(JSON.stringify({ ok:true, upserted: guestRows.length })); return;
     }catch(e){ res.statusCode=500; res.end(JSON.stringify({ ok:false, error:e.message||'tokeet-upsert error' })); return; }
   }
-  }
 
   // --- /tokeet-upsert-rows (DIRECT preseed) -----------------------------------
   if (req.method==='POST' && url.pathname==='/tokeet-upsert-rows'){

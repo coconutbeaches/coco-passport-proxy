@@ -1,0 +1,540 @@
+openapi: 3.1.0
+info:
+  title: Coconut Passport Proxy
+  version: 1.4.0
+  description: |
+    Passport intake proxy for CocoGPT. When SKIP_UPLOADS=1 (prod testing mode),
+    the model MUST NOT call /upload-url or /upload and MUST operate directly on
+    the original image URLs for MRZ/photo analysis.
+
+    **NEW**: Added `/coco-gpt-batch-passport` endpoint for intelligent batch processing
+    of multiple passports per stay with smart merging and validation.
+servers:
+  - url: https://coco-passport-proxy.vercel.app
+security: []
+paths:
+  /resolve:
+    get:
+      operationId: resolveStayId
+      summary: Normalize a free-text label (rooms + last) into canonical stay_id
+      parameters:
+        - in: query
+          name: stay_id
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Resolution result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  input:
+                    type: string
+                  rooms_in:
+                    type: string
+                  last_in:
+                    type: string
+                  rooms:
+                    type: array
+                    items:
+                      type: string
+                  last_name_canonical:
+                    type: string
+                  stay_id:
+                    type: string
+  /upload-url:
+    post:
+      operationId: uploadFromUrl
+      summary: Upload an image from a public URL (optional)
+      description: |
+        Optional convenience. In PRODUCTION with SKIP_UPLOADS=1:
+        • DO NOT CALL THIS ENDPOINT. Work directly from the original image URLs.
+        • If called anyway, the proxy returns `{ ok:true, object_path:"...", skipped:true }`
+          without fetching or storing the image.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - stay_id
+                - url
+              properties:
+                stay_id:
+                  type: string
+                url:
+                  type: string
+                filename:
+                  type: string
+                  description: Optional filename; defaults to UUID.jpg
+      responses:
+        "200":
+          description: Upload OK (or skipped when SKIP_UPLOADS=1)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  object_path:
+                    type: string
+                  skipped:
+                    type: boolean
+                    description: Present and true when uploads are bypassed (SKIP_UPLOADS=1)
+  /upload:
+    post:
+      operationId: uploadBinary
+      summary: Upload an image via raw bytes (fallback; optional)
+      description: |
+        Optional fallback. In PRODUCTION with SKIP_UPLOADS=1:
+        • DO NOT CALL THIS ENDPOINT. Work directly from the original image URLs.
+        • If called anyway, the proxy will bypass storage similarly to /upload-url.
+      parameters:
+        - in: query
+          name: stay_id
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: filename
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          image/jpeg:
+            schema:
+              type: string
+              format: binary
+          image/png:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: Upload OK (or skipped when SKIP_UPLOADS=1)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  object_path:
+                    type: string
+                  skipped:
+                    type: boolean
+                    description: Present and true when uploads are bypassed (SKIP_UPLOADS=1)
+  /insert:
+    post:
+      operationId: upsertPassport
+      summary: Upsert guest rows (photos optional; MRZ-first flow)
+      description: >
+        Writes directly to Supabase via PostgREST with `Prefer: resolution=merge-duplicates,return=representation` so
+        duplicates are merged automatically using the unique index on `(stay_id, lower(first_name))`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InsertRequest"
+      responses:
+        "200":
+          description: Upsert result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InsertResponse"
+  /merge-passport:
+    post:
+      operationId: mergePassport
+      summary: Merge-or-insert guest row based on stay_id and first_name
+      description: Merge or insert guest row based on stay_id and first_name without overwriting existing data.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EnhancedGuestRow"
+      responses:
+        "200":
+          description: Merge-or-insert result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  action:
+                    type: string
+                    enum:
+                      - merged
+                      - inserted
+  /coco-gpt-batch-passport:
+    post:
+      operationId: batchProcessPassports
+      summary: CocoGPT batch passport processing with intelligent merging
+      description: Process multiple passport photos for a single stay with intelligent merging and validation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BatchPassportRequest"
+      responses:
+        "200":
+          description: Batch processing results with detailed status for each passport
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BatchPassportResponse"
+        "400":
+          description: Invalid request format
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                  expected_format:
+                    $ref: "#/components/schemas/BatchPassportRequest"
+  /export:
+    get:
+      operationId: exportGuests
+      summary: 7-column tab-delimited export (Google Sheets-ready)
+      parameters:
+        - in: query
+          name: stay_id
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Export block
+          content:
+            text/plain:
+              schema:
+                type: string
+  /status:
+    get:
+      operationId: passportStatus
+      summary: One-line status for a stay_id
+      parameters:
+        - in: query
+          name: stay_id
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Status line
+          content:
+            text/plain:
+              schema:
+                type: string
+  /tokeet-upsert-rows:
+    post:
+      operationId: tokeetUpsertRows
+      summary: Preseed expected guest counts for stays
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpsertRowsRequest"
+      responses:
+        "200":
+          description: Upsert result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  upserted:
+                    type: integer
+components:
+  schemas:
+    InsertRequest:
+      type: object
+      required:
+        - rows
+      properties:
+        rows:
+          type: array
+          items:
+            $ref: "#/components/schemas/GuestRow"
+    GuestRow:
+      type: object
+      properties:
+        stay_id:
+          type: string
+        first_name:
+          type: string
+        middle_name:
+          type: string
+          nullable: true
+        last_name:
+          type: string
+        gender:
+          type: string
+          nullable: true
+          enum:
+            - M
+            - F
+            - ""
+        birthday:
+          type: string
+          description: YYYY-MM-DD
+        passport_number:
+          type: string
+        nationality_alpha3:
+          type: string
+          description: ISO-3166 alpha-3
+        photo_urls:
+          type: array
+          items:
+            type: string
+        source:
+          type: string
+    EnhancedGuestRow:
+      allOf:
+        - $ref: "#/components/schemas/GuestRow"
+        - type: object
+          properties:
+            issuing_country_alpha3:
+              type: string
+              description: ISO-3166 alpha-3 country code for passport issuing country
+            passport_issue_date:
+              type: string
+              description: YYYY-MM-DD format
+            passport_expiry_date:
+              type: string
+              description: YYYY-MM-DD format
+            mrz_full:
+              type: string
+              description: Full MRZ (Machine Readable Zone) string from passport
+            mrz_hash:
+              type: string
+              description: SHA-256 hash of normalized MRZ for duplicate detection
+            ocr_confidence:
+              type: number
+              description: OCR confidence score (0.0-1.0)
+              minimum: 0.0
+              maximum: 1.0
+    BatchPassportRequest:
+      type: object
+      required:
+        - stay_id
+        - passports
+      properties:
+        stay_id:
+          type: string
+          description: The stay identifier (e.g., "B7_Kislinger")
+          example: "B7_Kislinger"
+        passports:
+          type: array
+          description: Array of passport data from OCR/MRZ processing
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/CocoGPTPassport"
+    CocoGPTPassport:
+      type: object
+      required:
+        - first_name
+      properties:
+        first_name:
+          type: string
+          description: Guest's first name (required)
+          example: "Stefan"
+        middle_name:
+          type: string
+          description: Guest's middle name (optional)
+        last_name:
+          type: string
+          description: Guest's last name
+          example: "Kislinger"
+        gender:
+          type: string
+          enum: ["M", "F", ""]
+          description: Gender (M/F or empty)
+        birthday:
+          type: string
+          description: Birth date in YYYY-MM-DD format
+          example: "1985-03-15"
+        passport_number:
+          type: string
+          description: Passport number from OCR
+          example: "P123456789"
+        nationality_alpha3:
+          type: string
+          description: Nationality as 3-letter ISO code
+          example: "DEU"
+        issuing_country_alpha3:
+          type: string
+          description: Passport issuing country (3-letter ISO code)
+          example: "DEU"
+        passport_issue_date:
+          type: string
+          description: Passport issue date (YYYY-MM-DD)
+        passport_expiry_date:
+          type: string
+          description: Passport expiry date (YYYY-MM-DD)
+        mrz_full:
+          type: string
+          description: Full MRZ string from passport OCR
+          example: "P<DEUKISLINGER<<STEFAN<<<<<<<<<<<<<<<<<<<<<<<"
+        mrz_hash:
+          type: string
+          description: SHA-256 hash of MRZ (auto-generated if not provided)
+        ocr_confidence:
+          type: number
+          description: OCR confidence (0-1 or 0-100, will be normalized)
+          example: 0.95
+        photo_urls:
+          type: array
+          items:
+            type: string
+          description: URLs to passport photo images
+          example: ["https://example.com/passport1.jpg"]
+    BatchPassportResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Overall operation success
+        stay_id:
+          type: string
+          description: The processed stay ID
+        summary:
+          type: object
+          properties:
+            total:
+              type: integer
+              description: Total number of passports processed
+            merged:
+              type: integer
+              description: Number of passports merged into existing records
+            inserted:
+              type: integer
+              description: Number of new passport records inserted
+            errors:
+              type: integer
+              description: Number of passports that failed processing
+        results:
+          type: array
+          description: Detailed results for each passport
+          items:
+            type: object
+            properties:
+              index:
+                type: integer
+                description: Index in the original passports array
+              status:
+                type: string
+                enum: ["success", "error"]
+                description: Processing status for this passport
+              action:
+                type: string
+                enum: ["merged", "inserted"]
+                description: Action taken (only present on success)
+              first_name:
+                type: string
+                description: Guest's first name (only present on success)
+              passport_number:
+                type: string
+                description: Passport number (only present on success)
+              error:
+                type: string
+                description: Error message (only present on error)
+              passport:
+                type: object
+                description: Original passport data (only present on error)
+              warnings:
+                type: array
+                items:
+                  type: string
+                description: Validation warnings (MRZ conflicts, low OCR confidence, etc.)
+        sheets_format:
+          type: object
+          description: Google Sheets compatible tab-delimited format for easy copy-paste
+          properties:
+            description:
+              type: string
+              example: "Tab-delimited format ready for Google Sheets"
+            columns:
+              type: array
+              items:
+                type: string
+              description: Column headers in order
+              example: ["First Name", "Middle Name", "Last Name", "Gender", "Passport Number", "Nationality", "Birthday"]
+            data:
+              type: string
+              description: Tab-delimited data with headers, ready to copy and paste into Google Sheets
+              example: "First Name\tMiddle Name\tLast Name\tGender\tPassport Number\tNationality\tBirthday\nStefan\t\tKislinger\tM\tP123456\tDEU\t1985-03-15"
+            rows_count:
+              type: integer
+              description: Number of data rows (excluding header)
+              example: 1
+    InsertResponse:
+      oneOf:
+        - type: array
+          items: {}
+        - type: object
+          properties:
+            ok:
+              type: boolean
+            via:
+              type: string
+            inserted:
+              type: integer
+            rows:
+              type: array
+              items: {}
+            skipped:
+              type: array
+              items:
+                type: object
+                properties:
+                  passport_number:
+                    type: string
+                  reason:
+                    type: string
+                  raw:
+                    type: string
+          additionalProperties: true
+    UpsertRowsRequest:
+      type: object
+      required:
+        - rows
+      properties:
+        rows:
+          type: array
+          items:
+            type: object
+            required:
+              - stay_id
+            properties:
+              stay_id:
+                type: string
+              rooms:
+                type: array
+                items:
+                  type: string
+              check_in:
+                type: string
+                format: date
+              check_out:
+                type: string
+                format: date
+              expected_guest_count:
+                type: integer

@@ -1,3 +1,4 @@
 .vercel
 index.js.bak*
 vercel.json.bak*
+.env*.local

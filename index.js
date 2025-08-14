@@ -1,9 +1,15 @@
 const crypto = require('crypto');
+const { parse } = require('csv-parse/sync');
+const { CSV_TO_DB_MAPPING, DEFAULT_RECORD_VALUES } = require('./lib/tokeetFieldMap');
 
 // Base URL configuration with runtime safety check
 const PUBLIC_PASSPORT_PROXY_URL = 'https://coco-passport-proxy.vercel.app';
 
-// Runtime "public-URL or bust" safety check
+/**
+ * Validates and returns the base URL for the passport proxy service
+ * Performs safety checks for vercel.app domains to prevent TestFlight build drift
+ * @returns {string} Valid base URL for the passport proxy service
+ */
 function validateAndGetBaseUrl() {
   // Allow environment override, but default to public URL
   const configuredUrl = process.env.PASSPORT_PROXY_BASE_URL || PUBLIC_PASSPORT_PROXY_URL;
@@ -35,17 +41,34 @@ function validateAndGetBaseUrl() {
 const PASSPORT_PROXY_BASE_URL = validateAndGetBaseUrl();
 
 // --- tiny helpers ------------------------------------------------------------
+/**
+ * Parses JSON request body from Node.js request stream
+ * @param {import('http').IncomingMessage} req - The HTTP request object
+ * @returns {Promise<Object>} Promise resolving to parsed JSON object or empty object
+ */
 const parseBody = (req) => new Promise((resolve, reject) => {
   let data = ''; req.on('data', c => data += c);
   req.on('end', () => { try { resolve(data ? JSON.parse(data) : {}); } catch (e) { reject(e); } });
   req.on('error', reject);
 });
+/**
+ * Fetches URL and attempts to parse response as JSON
+ * @param {string} url - The URL to fetch
+ * @param {Object} [opts={}] - Fetch options
+ * @returns {Promise<{ok: boolean, status: number, json: Object|null, text: string}>} Response object
+ */
 async function fetchJson(url, opts={}) {
   const r = await fetch(url, opts);
   const text = await r.text();
   try { return { ok: r.ok, status: r.status, json: JSON.parse(text), text }; }
   catch { return { ok: r.ok, status: r.status, json: null, text }; }
 }
+/**
+ * Sets CORS headers and handles OPTIONS preflight requests
+ * @param {import('http').IncomingMessage} req - HTTP request object
+ * @param {import('http').ServerResponse} res - HTTP response object
+ * @returns {boolean} True if OPTIONS request was handled, false otherwise
+ */
 function sendCORS(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
@@ -53,23 +76,476 @@ function sendCORS(req, res) {
   if (req.method === 'OPTIONS') { res.statusCode = 204; res.end(); return true; }
   return false;
 }
+/**
+ * Pads single digit numbers with leading zero
+ * @param {number} n - Number to pad
+ * @returns {string} Padded number as string
+ */
 function pad(n){return n<10?'0'+n:String(n)}
+
+/**
+ * Formats date according to simple template format
+ * @param {Date} d - Date to format
+ * @param {string} fmt - Format string with %m, %d, %Y placeholders
+ * @returns {string} Formatted date string
+ */
 function fmtDate(d, fmt){ return fmt.replace('%m', pad(d.getMonth()+1)).replace('%d', pad(d.getDate())).replace('%Y', d.getFullYear()) }
+
+/**
+ * Resolves date template placeholders in URL strings
+ * Replaces {start:%format} and {end:%format} with tomorrow's date in UTC
+ * @param {string} urlStr - URL string potentially containing date templates
+ * @returns {string} URL with resolved date templates
+ */
 function resolveTemplateDates(urlStr){
   try{
     const now = new Date();
-    const tmr = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()+1)); // “tomorrow” UTC
+    const tmr = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()+1)); // "tomorrow" UTC
     return urlStr
       .replace(/{start:%([^}]+)}/g, (_,fmt)=>fmtDate(tmr, '%'+fmt))
       .replace(/{end:%([^}]+)}/g,   (_,fmt)=>fmtDate(tmr, '%'+fmt));
   }catch{ return urlStr }
 }
 
-// Resolver bits
+// CSV to DB field mapping now imported from centralized lib/tokeetFieldMap.js
+
+/**
+ * Coerces string values to specific types with fallback to null on empty/invalid values
+ * @param {any} value - The value to coerce
+ * @param {string} type - Target type: 'integer', 'numeric', 'date', 'time', 'array', or 'string'
+ * @returns {any|null} Coerced value or null if coercion fails
+ */
+function coerceValue(value, type) {
+  if (!value || value === '' || value === 'null' || value === 'undefined') {
+    return null;
+  }
+  
+  const trimmed = String(value).trim();
+  if (!trimmed) return null;
+  
+  switch (type) {
+    case 'integer':
+      const intVal = Number(trimmed);
+      return Number.isInteger(intVal) ? intVal : null;
+    
+    case 'numeric':
+      const numVal = parseFloat(trimmed);
+      return !isNaN(numVal) && isFinite(numVal) ? numVal : null;
+    
+    case 'date':
+      try {
+        const dateVal = new Date(trimmed);
+        return !isNaN(dateVal.getTime()) ? dateVal.toISOString().split('T')[0] : null;
+      } catch {
+        return null;
+      }
+    
+    case 'time':
+      // Handle time format like "15:00" or "12:00"
+      if (/^\d{1,2}:\d{2}$/.test(trimmed)) {
+        return trimmed;
+      }
+      return null;
+    
+    case 'array':
+      // Handle comma-separated values or JSON arrays
+      if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+        try {
+          const parsed = JSON.parse(trimmed);
+          return Array.isArray(parsed) ? parsed.filter(Boolean) : null;
+        } catch {
+          return null;
+        }
+      }
+      return trimmed.split(',').map(s => s.trim()).filter(Boolean);
+    
+    case 'string':
+    default:
+      // Preserve original strings for ambiguous cases (phone, email, currency)
+      return trimmed;
+  }
+}
+
+/**
+ * Parses a CSV row into a database-compatible object using field mappings
+ * Applies type coercion, generates derived fields, and sets default values
+ * @param {string[]} csvRow - Array of CSV field values
+ * @param {string[]} headers - Array of CSV column headers
+ * @returns {Object} Database-compatible object with all mapped fields
+ */
+function parseCSVRowToDBObject(csvRow, headers) {
+  const dbObject = {
+    ...DEFAULT_RECORD_VALUES,
+    raw_json: csvRow // Store original CSV row as JSON
+  };
+  
+  // Process each CSV field
+  headers.forEach((header, index) => {
+    const mapping = CSV_TO_DB_MAPPING[header];
+    if (!mapping || !mapping.dbField) return; // Skip unmapped fields
+    
+    const rawValue = csvRow[index];
+    const coercedValue = coerceValue(rawValue, mapping.parser);
+    dbObject[mapping.dbField] = coercedValue;
+  });
+  
+  // Special processing for Name field (split into first_name/last_name)
+  if (dbObject.name_full) {
+    const nameParts = dbObject.name_full.split(' ').filter(Boolean);
+    dbObject.first_name = nameParts[0] || null;
+    dbObject.last_name = nameParts.slice(1).join(' ') || nameParts[0] || null; // If only one name, use it as last name too
+    
+    // Extract middle_name if there are 3+ parts
+    if (nameParts.length >= 3) {
+      dbObject.middle_name = nameParts.slice(1, -1).join(' ');
+      dbObject.last_name = nameParts[nameParts.length - 1];
+    }
+  }
+  
+  // Generate rental_units array from rental_unit field
+  if (dbObject.rental_unit) {
+    const roomMatches = dbObject.rental_unit.match(/\(([AB]\d+)\)/g) || 
+                       dbObject.rental_unit.match(/^([AB]\d+)/g) ||
+                       dbObject.rental_unit.match(/(Beach House|Jungle House|Double House|New House)/g) || [];
+    dbObject.rental_units = roomMatches.map(match => match.replace(/[()]/g, ''));
+  }
+  
+  // Generate stay_id using existing logic
+  if (dbObject.rental_unit && dbObject.last_name) {
+    const label = `${dbObject.rental_unit} ${dbObject.last_name}`;
+    const normalized = normalizeStayIdFreeform(label);
+    dbObject.stay_id = normalized.stay_id;
+  }
+  
+  // Set external_reservation_id from booking_id or inquiry_id
+  if (!dbObject.external_reservation_id) {
+    dbObject.external_reservation_id = dbObject.booking_id || dbObject.inquiry_id || null;
+  }
+  
+  // Clean up temporary fields
+  delete dbObject.name_full;
+  
+  return dbObject;
+}
+
+// Resolver bits - Stay ID generation constants and functions
 const ROOM_ORDER = ["A3","A4","A5","A6","A7","A8","A9","B6","B7","B8","B9","Double House","Jungle House","Beach House","New House"];
 const TWO_WORD_ROOMS = ["Double House","Jungle House","Beach House","New House"];
 const ONE_WORD_ROOMS = ["A3","A4","A5","A6","A7","A8","A9","B6","B7","B8","B9"];
+
+/**
+ * Capitalizes first letter and lowercases the rest
+ * @param {string} s - String to capitalize
+ * @returns {string} Capitalized string
+ */
 function cap1(s){ if(!s) return s; return s[0].toUpperCase()+s.slice(1).toLowerCase(); }
+
+/**
+ * Validates and extracts data from MRZ (Machine Readable Zone) string
+ * @param {string} mrzString - The raw MRZ string from passport OCR
+ * @returns {Object} Parsed MRZ data with validation results
+ */
+function parseMRZ(mrzString) {
+  if (!mrzString || typeof mrzString !== 'string') {
+    return { valid: false, error: 'Invalid MRZ string' };
+  }
+  
+  const mrz = mrzString.trim().replace(/\s+/g, '');
+  
+  // Basic MRZ validation patterns
+  const mrzPatterns = {
+    // TD1 (3 line format) - ID cards
+    td1: /^[A-Z0-9<]{30}\n?[A-Z0-9<]{30}\n?[A-Z0-9<]{30}$/,
+    // TD3 (2 line format) - Passports
+    td3: /^P<[A-Z]{3}[A-Z<]{25,39}\n?[A-Z0-9<]{44}$/,
+    // Simple passport pattern
+    passport: /^P<[A-Z]{3}/
+  };
+  
+  let format = 'unknown';
+  if (mrzPatterns.td3.test(mrz)) format = 'TD3';
+  else if (mrzPatterns.td1.test(mrz)) format = 'TD1';
+  else if (mrzPatterns.passport.test(mrz)) format = 'passport';
+  
+  // Extract basic passport info for TD3 format
+  if (format === 'TD3' || format === 'passport') {
+    try {
+      const lines = mrz.split('\n').filter(Boolean);
+      if (lines.length >= 1) {
+        const line1 = lines[0] || mrz.substring(0, Math.min(44, mrz.length));
+        
+        // Extract country code (positions 2-4)
+        const issuingCountry = line1.substring(2, 5).replace(/</g, '');
+        
+        // Extract name section (positions 5+)
+        const nameSection = line1.substring(5).replace(/</g, ' ').trim();
+        const nameParts = nameSection.split(/\s+/).filter(Boolean);
+        
+        return {
+          valid: true,
+          format,
+          issuingCountry: issuingCountry || null,
+          extractedName: nameSection || null,
+          nameParts: nameParts,
+          lastName: nameParts[0] || null,
+          firstName: nameParts.slice(1).join(' ') || null,
+          raw: mrz
+        };
+      }
+    } catch (error) {
+      return {
+        valid: false,
+        error: `MRZ parsing failed: ${error.message}`,
+        raw: mrz
+      };
+    }
+  }
+  
+  return {
+    valid: format !== 'unknown',
+    format,
+    raw: mrz,
+    error: format === 'unknown' ? 'Unrecognized MRZ format' : null
+  };
+}
+
+/**
+ * Generates a hash for MRZ string for duplicate detection
+ * @param {string} mrzString - The MRZ string to hash
+ * @returns {string|null} SHA-256 hash of normalized MRZ or null if invalid
+ */
+function generateMRZHash(mrzString) {
+  if (!mrzString || typeof mrzString !== 'string') {
+    return null;
+  }
+  
+  // Normalize MRZ by removing whitespace and converting to uppercase
+  const normalized = mrzString.trim().replace(/\s+/g, '').toUpperCase();
+  
+  try {
+    return crypto.createHash('sha256').update(normalized).digest('hex');
+  } catch (error) {
+    console.error('MRZ hash generation failed:', error);
+    return null;
+  }
+}
+
+/**
+ * Validates OCR confidence score and provides quality assessment
+ * @param {number} confidence - OCR confidence score (0-1 or 0-100)
+ * @returns {Object} Validation results and quality assessment
+ */
+function validateOCRConfidence(confidence) {
+  if (confidence === null || confidence === undefined) {
+    return { valid: false, quality: 'unknown', normalized: null };
+  }
+  
+  const num = parseFloat(confidence);
+  if (isNaN(num)) {
+    return { valid: false, quality: 'invalid', normalized: null };
+  }
+  
+  // Normalize to 0-1 scale if it appears to be 0-100
+  const normalized = num > 1 ? num / 100 : num;
+  
+  if (normalized < 0 || normalized > 1) {
+    return { valid: false, quality: 'out_of_range', normalized: null };
+  }
+  
+  let quality = 'poor';
+  if (normalized >= 0.95) quality = 'excellent';
+  else if (normalized >= 0.85) quality = 'good';
+  else if (normalized >= 0.70) quality = 'fair';
+  
+  return {
+    valid: true,
+    quality,
+    normalized,
+    shouldReview: normalized < 0.85,
+    recommendation: normalized < 0.70 ? 'manual_review_required' : 'acceptable'
+  };
+}
+
+/**
+ * Checks for potential duplicate passports based on multiple criteria
+ * @param {Object} newPassport - The new passport data to check
+ * @param {Array} existingPassports - Array of existing passport records
+ * @returns {Object} Duplicate detection results
+ */
+function detectPassportDuplicates(newPassport, existingPassports = []) {
+  const duplicates = {
+    exact: [],
+    similar: [],
+    potential: []
+  };
+  
+  if (!Array.isArray(existingPassports) || !newPassport) {
+    return duplicates;
+  }
+  
+  for (const existing of existingPassports) {
+    const checks = {
+      samePassportNumber: newPassport.passport_number && existing.passport_number && 
+                         newPassport.passport_number === existing.passport_number,
+      sameMRZHash: newPassport.mrz_hash && existing.mrz_hash && 
+                  newPassport.mrz_hash === existing.mrz_hash,
+      sameName: newPassport.first_name && existing.first_name &&
+               newPassport.first_name.toLowerCase() === existing.first_name.toLowerCase() &&
+               newPassport.last_name && existing.last_name &&
+               newPassport.last_name.toLowerCase() === existing.last_name.toLowerCase(),
+      sameStayAndName: newPassport.stay_id === existing.stay_id && checks.sameName
+    };
+    
+    if (checks.samePassportNumber || checks.sameMRZHash) {
+      duplicates.exact.push({ record: existing, reason: 'passport_number_or_mrz_match' });
+    } else if (checks.sameStayAndName) {
+      duplicates.similar.push({ record: existing, reason: 'same_guest_same_stay' });
+    } else if (checks.sameName) {
+      duplicates.potential.push({ record: existing, reason: 'name_match_different_stay' });
+    }
+  }
+  
+  return duplicates;
+}
+
+/**
+ * Direct merge-passport logic without HTTP request (for serverless batch processing)
+ * @param {Object} passportData - Passport data to merge or insert
+ * @returns {Promise<Object>} Result with action: 'merged' or 'inserted'
+ */
+async function mergePassportDirect(passportData) {
+  const { Pool } = require('pg');
+  
+  const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: { rejectUnauthorized: false }
+  });
+
+  const {
+    stay_id,
+    first_name,
+    middle_name,
+    last_name,
+    gender,
+    birthday,
+    passport_number,
+    nationality_alpha3,
+    issuing_country_alpha3,
+    passport_issue_date,
+    passport_expiry_date,
+    mrz_full,
+    mrz_hash,
+    ocr_confidence,
+    photo_urls,
+    source
+  } = passportData;
+
+  if (!stay_id || !first_name) {
+    throw new Error("stay_id and first_name are required");
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    // Try merge update first
+    const updateQuery = `
+      UPDATE incoming_guests
+      SET
+        last_name = COALESCE(NULLIF($1, ''), last_name),
+        middle_name = COALESCE(NULLIF($2, ''), middle_name),
+        gender = COALESCE(NULLIF($3, ''), gender),
+        birthday = COALESCE(NULLIF(NULLIF($4, '')::date, NULL), birthday),
+        passport_number = COALESCE(NULLIF($5, ''), passport_number),
+        nationality_alpha3 = COALESCE(NULLIF($6, ''), nationality_alpha3),
+        issuing_country_alpha3 = COALESCE(NULLIF($7, ''), issuing_country_alpha3),
+        passport_issue_date = COALESCE(NULLIF(NULLIF($8, '')::date, NULL), passport_issue_date),
+        passport_expiry_date = COALESCE(NULLIF(NULLIF($9, '')::date, NULL), passport_expiry_date),
+        mrz_full = COALESCE(NULLIF($10, ''), mrz_full),
+        mrz_hash = COALESCE(NULLIF($11, ''), mrz_hash),
+        ocr_confidence = COALESCE(NULLIF($12, '')::numeric, ocr_confidence),
+        photo_urls = CASE
+          WHEN $13::text[] IS NOT NULL AND array_length($13::text[], 1) > 0
+          THEN $13::text[]
+          ELSE photo_urls
+        END,
+        source = COALESCE(NULLIF($14, ''), source)
+      WHERE stay_id = $15
+        AND lower(first_name) = lower($16)
+    `;
+    const updateValues = [
+      last_name || "",
+      middle_name || "",
+      gender || "",
+      birthday || "",
+      passport_number || "",
+      nationality_alpha3 || "",
+      issuing_country_alpha3 || "",
+      passport_issue_date || "",
+      passport_expiry_date || "",
+      mrz_full || "",
+      mrz_hash || "",
+      ocr_confidence || "",
+      photo_urls && photo_urls.length > 0 ? photo_urls : null,
+      source || "coco_gpt_merge",
+      stay_id,
+      first_name
+    ];
+    const updateResult = await client.query(updateQuery, updateValues);
+
+    // If no update happened, insert new row
+    if (updateResult.rowCount === 0) {
+      const insertQuery = `
+        INSERT INTO incoming_guests (
+          stay_id, first_name, middle_name, last_name, gender,
+          birthday, passport_number, nationality_alpha3, issuing_country_alpha3,
+          passport_issue_date, passport_expiry_date, mrz_full, mrz_hash,
+          ocr_confidence, photo_urls, source
+        )
+        VALUES ($1, $2, $3, $4, $5, NULLIF($6, '')::date, $7, $8, $9, 
+                NULLIF($10, '')::date, NULLIF($11, '')::date, $12, $13,
+                NULLIF($14, '')::numeric, $15, $16)
+      `;
+      await client.query(insertQuery, [
+        stay_id,
+        first_name,
+        middle_name || "",
+        last_name || "",
+        gender || "",
+        birthday || "",
+        passport_number || "",
+        nationality_alpha3 || "",
+        issuing_country_alpha3 || "",
+        passport_issue_date || "",
+        passport_expiry_date || "",
+        mrz_full || "",
+        mrz_hash || "",
+        ocr_confidence || "",
+        photo_urls && photo_urls.length > 0 ? photo_urls : null,
+        source || "coco_gpt_insert"
+      ]);
+    }
+
+    await client.query("COMMIT");
+    
+    return {
+      success: true,
+      action: updateResult.rowCount > 0 ? "merged" : "inserted"
+    };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Normalizes freeform text into structured stay ID components
+ * Extracts room codes and guest names from natural language input
+ * @param {string} raw - Raw input string containing room and guest information
+ * @returns {Object} Object with parsed components and generated stay_id
+ */
 function normalizeStayIdFreeform(raw){
   if (!raw) return { input:'', rooms_in:'', last_in:'', rooms:[], last_name_canonical:'', stay_id:'' };
   const cleaned = String(raw).trim().replace(/[,\.;:]+/g,' ');
@@ -279,6 +755,14 @@ module.exports = async (req, res) => {
         delete updateData.stay_id; // Don't update the key fields
         delete updateData.first_name;
         
+        // Ensure new passport document fields are included in updates
+        if (row.issuing_country_alpha3 !== undefined) updateData.issuing_country_alpha3 = row.issuing_country_alpha3;
+        if (row.passport_issue_date !== undefined) updateData.passport_issue_date = row.passport_issue_date;
+        if (row.passport_expiry_date !== undefined) updateData.passport_expiry_date = row.passport_expiry_date;
+        if (row.mrz_full !== undefined) updateData.mrz_full = row.mrz_full;
+        if (row.mrz_hash !== undefined) updateData.mrz_hash = row.mrz_hash;
+        if (row.ocr_confidence !== undefined) updateData.ocr_confidence = row.ocr_confidence;
+        
         const updateResp = await fetch(updateUrl, {
           method: 'PATCH',
           headers: { ...baseHeaders, Prefer: 'return=representation' },
@@ -436,6 +920,206 @@ module.exports = async (req, res) => {
     return;
   }
 
+  // --- /coco-gpt-batch-passport (CocoGPT batch processing) --------------------
+  if (req.method === 'POST' && url.pathname === '/coco-gpt-batch-passport') {
+    try {
+      const body = await parseBody(req).catch(() => ({}));
+      const { stay_id, passports } = body;
+      
+      if (!stay_id || !Array.isArray(passports) || passports.length === 0) {
+        res.statusCode = 400;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ 
+          error: "stay_id and passports array are required",
+          expected_format: {
+            stay_id: "B7_Kislinger",
+            passports: [
+              {
+                first_name: "Stefan",
+                last_name: "Kislinger", 
+                passport_number: "P123456",
+                nationality_alpha3: "DEU",
+                mrz_full: "P<DEUKISLINGER<<STEFAN<<<<<<<<<<<<<<<<<<<<<",
+                ocr_confidence: 0.95,
+                photo_urls: ["https://example.com/photo1.jpg"]
+              }
+            ]
+          }
+        })); 
+        return; 
+      }
+      
+      const results = [];
+      let merged = 0, inserted = 0, errors = 0;
+      
+      // Process each passport in the batch
+      for (let i = 0; i < passports.length; i++) {
+        const passport = passports[i];
+        
+        try {
+          // Validate required fields for each passport
+          if (!passport.first_name) {
+            results.push({
+              index: i,
+              status: 'error',
+              error: 'first_name is required',
+              passport: passport
+            });
+            errors++;
+            continue;
+          }
+          
+          // Enhanced validation and processing
+          const warnings = [];
+          
+          // Validate and parse MRZ if provided
+          let mrzData = null;
+          let mrzHash = passport.mrz_hash;
+          if (passport.mrz_full) {
+            mrzData = parseMRZ(passport.mrz_full);
+            if (!mrzData.valid) {
+              warnings.push(`Invalid MRZ: ${mrzData.error}`);
+            } else {
+              // Auto-generate MRZ hash if not provided
+              if (!mrzHash) {
+                mrzHash = generateMRZHash(passport.mrz_full);
+              }
+              
+              // Cross-validate MRZ data with provided data
+              if (mrzData.issuingCountry && passport.issuing_country_alpha3 && 
+                  mrzData.issuingCountry !== passport.issuing_country_alpha3) {
+                warnings.push(`MRZ country (${mrzData.issuingCountry}) doesn't match issuing_country_alpha3 (${passport.issuing_country_alpha3})`);
+              }
+            }
+          }
+          
+          // Validate OCR confidence
+          let ocrValidation = null;
+          if (passport.ocr_confidence !== null && passport.ocr_confidence !== undefined) {
+            ocrValidation = validateOCRConfidence(passport.ocr_confidence);
+            if (!ocrValidation.valid) {
+              warnings.push(`Invalid OCR confidence: ${ocrValidation.quality}`);
+            } else if (ocrValidation.shouldReview) {
+              warnings.push(`Low OCR confidence (${ocrValidation.normalized}): ${ocrValidation.recommendation}`);
+            }
+          }
+          
+          // Prepare passport data with stay_id and source
+          const passportData = {
+            stay_id,
+            first_name: passport.first_name,
+            middle_name: passport.middle_name || '',
+            last_name: passport.last_name || '',
+            gender: passport.gender || '',
+            birthday: passport.birthday || '',
+            passport_number: passport.passport_number || '',
+            nationality_alpha3: passport.nationality_alpha3 || '',
+            issuing_country_alpha3: passport.issuing_country_alpha3 || (mrzData?.issuingCountry) || '',
+            passport_issue_date: passport.passport_issue_date || '',
+            passport_expiry_date: passport.passport_expiry_date || '',
+            mrz_full: passport.mrz_full || '',
+            mrz_hash: mrzHash || '',
+            ocr_confidence: ocrValidation?.normalized || passport.ocr_confidence || null,
+            photo_urls: Array.isArray(passport.photo_urls) ? passport.photo_urls : [],
+            source: 'coco_gpt_batch'
+          };
+          
+          // Call merge-passport logic directly (avoid HTTP request in serverless)
+          try {
+            const mergeResult = await mergePassportDirect(passportData);
+            results.push({
+              index: i,
+              status: 'success',
+              action: mergeResult.action,
+              first_name: passport.first_name,
+              passport_number: passport.passport_number
+            });
+            
+            if (mergeResult.action === 'merged') {
+              merged++;
+            } else {
+              inserted++;
+            }
+          } catch (mergeError) {
+            results.push({
+              index: i,
+              status: 'error',
+              error: `Merge failed: ${mergeError.message}`,
+              passport: passport
+            });
+            errors++;
+          }
+        } catch (err) {
+          results.push({
+            index: i,
+            status: 'error',
+            error: err.message,
+            passport: passport
+          });
+          errors++;
+        }
+      }
+      
+      // Generate Google Sheets formatted output for TM30 Immigration format
+      let sheetsOutput = 'First Name \tMiddle Name\tLast Name\tGender *\tPassport No. *\tNationality *\tBirth Date (DD/MM/YYYY)\tCheck-out Date (DD/MM/YYYY)\tPhone No.';
+      const successfulPassports = results.filter(r => r.status === 'success');
+      
+      for (const result of successfulPassports) {
+        const originalPassport = passports[result.index];
+        const firstName = originalPassport.first_name || '';
+        const middleName = originalPassport.middle_name || '';
+        const lastName = originalPassport.last_name || '';
+        const gender = originalPassport.gender || '';
+        const passportNumber = originalPassport.passport_number || '';
+        const nationality = originalPassport.nationality_alpha3 || '';
+        
+        // Convert birthday from YYYY-MM-DD to DD/MM/YYYY format
+        let birthdayFormatted = '';
+        if (originalPassport.birthday) {
+          const dateMatch = originalPassport.birthday.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+          if (dateMatch) {
+            const [, year, month, day] = dateMatch;
+            birthdayFormatted = `${day}/${month}/${year}`;
+          } else {
+            birthdayFormatted = originalPassport.birthday; // Use as-is if not in expected format
+          }
+        }
+        
+        // For now, leave check-out date and phone empty (to be filled manually)
+        const checkoutDate = '';
+        const phoneNo = '';
+        
+        sheetsOutput += `\n${firstName}\t${middleName}\t${lastName}\t${gender}\t${passportNumber}\t${nationality}\t${birthdayFormatted}\t${checkoutDate}\t${phoneNo}`;
+      }
+      
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({
+        success: true,
+        stay_id,
+        summary: {
+          total: passports.length,
+          merged,
+          inserted,
+          errors
+        },
+        results,
+        sheets_format: {
+          description: 'Tab-delimited format ready for Google Sheets',
+          columns: ['First Name', 'Middle Name', 'Last Name', 'Gender', 'Passport Number', 'Nationality', 'Birthday'],
+          data: sheetsOutput,
+          rows_count: successfulPassports.length
+        }
+      }));
+      
+    } catch (err) {
+      console.error('CocoGPT batch processing error:', err);
+      res.statusCode = 500;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
   // --- /merge-passport (direct PostgreSQL merge-or-insert) --------------------
   if (req.method === 'POST' && url.pathname === '/merge-passport') {
     const { Pool } = require('pg');
@@ -456,6 +1140,12 @@ module.exports = async (req, res) => {
         birthday,
         passport_number,
         nationality_alpha3,
+        issuing_country_alpha3,
+        passport_issue_date,
+        passport_expiry_date,
+        mrz_full,
+        mrz_hash,
+        ocr_confidence,
         photo_urls,
         source
       } = body;
@@ -481,14 +1171,20 @@ module.exports = async (req, res) => {
             birthday = COALESCE(NULLIF(NULLIF($4, '')::date, NULL), birthday),
             passport_number = COALESCE(NULLIF($5, ''), passport_number),
             nationality_alpha3 = COALESCE(NULLIF($6, ''), nationality_alpha3),
+            issuing_country_alpha3 = COALESCE(NULLIF($7, ''), issuing_country_alpha3),
+            passport_issue_date = COALESCE(NULLIF(NULLIF($8, '')::date, NULL), passport_issue_date),
+            passport_expiry_date = COALESCE(NULLIF(NULLIF($9, '')::date, NULL), passport_expiry_date),
+            mrz_full = COALESCE(NULLIF($10, ''), mrz_full),
+            mrz_hash = COALESCE(NULLIF($11, ''), mrz_hash),
+            ocr_confidence = COALESCE(NULLIF($12, '')::numeric, ocr_confidence),
             photo_urls = CASE
-              WHEN $7::text[] IS NOT NULL AND array_length($7::text[], 1) > 0
-              THEN $7::text[]
+              WHEN $13::text[] IS NOT NULL AND array_length($13::text[], 1) > 0
+              THEN $13::text[]
               ELSE photo_urls
             END,
-            source = COALESCE(NULLIF($8, ''), source)
-          WHERE stay_id = $9
-            AND lower(first_name) = lower($10)
+            source = COALESCE(NULLIF($14, ''), source)
+          WHERE stay_id = $15
+            AND lower(first_name) = lower($16)
         `;
         const updateValues = [
           last_name || "",
@@ -497,6 +1193,12 @@ module.exports = async (req, res) => {
           birthday || "",
           passport_number || "",
           nationality_alpha3 || "",
+          issuing_country_alpha3 || "",
+          passport_issue_date || "",
+          passport_expiry_date || "",
+          mrz_full || "",
+          mrz_hash || "",
+          ocr_confidence || "",
           photo_urls && photo_urls.length > 0 ? photo_urls : null,
           source || "coco_gpt_merge",
           stay_id,
@@ -509,9 +1211,13 @@ module.exports = async (req, res) => {
           const insertQuery = `
             INSERT INTO incoming_guests (
               stay_id, first_name, middle_name, last_name, gender,
-              birthday, passport_number, nationality_alpha3, photo_urls, source
+              birthday, passport_number, nationality_alpha3, issuing_country_alpha3,
+              passport_issue_date, passport_expiry_date, mrz_full, mrz_hash,
+              ocr_confidence, photo_urls, source
             )
-            VALUES ($1, $2, $3, $4, $5, NULLIF($6, '')::date, $7, $8, $9, $10)
+            VALUES ($1, $2, $3, $4, $5, NULLIF($6, '')::date, $7, $8, $9, 
+                    NULLIF($10, '')::date, NULLIF($11, '')::date, $12, $13,
+                    NULLIF($14, '')::numeric, $15, $16)
           `;
           await client.query(insertQuery, [
             stay_id,
@@ -522,6 +1228,12 @@ module.exports = async (req, res) => {
             birthday || "",
             passport_number || "",
             nationality_alpha3 || "",
+            issuing_country_alpha3 || "",
+            passport_issue_date || "",
+            passport_expiry_date || "",
+            mrz_full || "",
+            mrz_hash || "",
+            ocr_confidence || "",
             photo_urls && photo_urls.length > 0 ? photo_urls : null,
             source || "coco_gpt_insert"
           ]);
@@ -611,143 +1323,192 @@ module.exports = async (req, res) => {
       const feed = await fetchJson(feedUrl);
       if (!feed.ok){ res.statusCode=feed.status||500; res.end(JSON.stringify({ ok:false, error:'fetch feed failed', body: feed.text })); return; }
 
-      let items = [];
+      let dbRows = [];
       
       // Check if response is JSON or CSV
       if (feed.json && Array.isArray(feed.json)) {
-        // JSON format (original logic)
-        items = feed.json;
-      } else if (feed.text && feed.text.includes('"Name"')) {
-        // CSV format - parse it
-        const csvLines = feed.text.split('\n').filter(line => line.trim());
-        const headers = csvLines[0].split(',').map(h => h.replace(/"/g, '').trim());
-        
-        for (let i = 1; i < csvLines.length; i++) {
-          const values = [];
-          let current = '';
-          let inQuotes = false;
+        // JSON format (original logic) - convert to DB objects
+        for (const jsonItem of feed.json) {
+          // Create a pseudo-CSV row for compatibility with parseCSVRowToDBObject
+          const pseudoCSVRow = [
+            jsonItem.Name || jsonItem.full_name || '',
+            jsonItem.Email || jsonItem.email || '',
+            '', // Guest Secondary Emails
+            jsonItem.Telephone || jsonItem.phone || '',
+            '', // Guest Secondary Phones
+            jsonItem.Address || jsonItem.guest_address || '',
+            jsonItem.Status || jsonItem.booking_status || '',
+            jsonItem.Rental || jsonItem.rental || '',
+            jsonItem.Arrive || jsonItem.check_in || '',
+            jsonItem.Depart || jsonItem.check_out || '',
+            jsonItem.Nights || jsonItem.nights || '',
+            jsonItem.Received || '',
+            jsonItem.Checkin || jsonItem.checkin_time || '',
+            jsonItem.Checkout || jsonItem.checkout_time || '',
+            jsonItem.BookingID || jsonItem.booking_id || '',
+            jsonItem.InquiryID || jsonItem.inquiry_id || '',
+            jsonItem.Source || jsonItem.source || '',
+            jsonItem.Booked || '',
+            jsonItem.Adults || jsonItem.adults || '',
+            jsonItem.Children || jsonItem.children || '',
+            jsonItem.Currency || jsonItem.currency || '',
+            jsonItem.TotalCost || jsonItem.total_cost || '',
+            jsonItem.BaseRate || jsonItem.base_rate || '',
+            jsonItem.Tax || jsonItem.tax || '',
+            jsonItem.BookingFormula || jsonItem.booking_formula || '',
+            jsonItem.GuestID || jsonItem.guest_id || ''
+          ];
           
-          // Simple CSV parser that handles quoted values
-          for (let char of csvLines[i]) {
-            if (char === '"') {
-              inQuotes = !inQuotes;
-            } else if (char === ',' && !inQuotes) {
-              values.push(current.trim());
-              current = '';
-            } else {
-              current += char;
-            }
+          const headers = Object.keys(CSV_TO_DB_MAPPING);
+          const dbObject = parseCSVRowToDBObject(pseudoCSVRow, headers);
+          if (dbObject.stay_id) {
+            dbRows.push(dbObject);
           }
-          values.push(current.trim()); // Add the last value
-          
-          // Create item object from CSV row
-          const item = {};
-          headers.forEach((header, index) => {
-            item[header] = values[index] || '';
+        }
+      } else if (feed.text && (feed.text.includes('"Name"') || feed.text.includes('Name,'))) {
+        // CSV format - use proper csv-parse
+        try {
+          const records = parse(feed.text, {
+            columns: true,
+            skip_empty_lines: true,
+            trim: true,
+            quote: '"',
+            delimiter: ','
           });
           
-          // Map CSV fields to expected format
-          if (item.Name && item.Rental) {
-            // Extract room from Rental field like "A4 · 1 Bedroom / 1 Bath at Coconut Beach Bungalows (A4)"
-            const roomMatch = item.Rental.match(/\(([AB]\d+)\)/) || item.Rental.match(/^([AB]\d+)/);
-            const room = roomMatch ? roomMatch[1] : '';
+          // Convert each CSV record to DB object with type coercion
+          for (const record of records) {
+            // Extract headers and values in the same order as CSV_TO_DB_MAPPING
+            const headers = Object.keys(record);
+            const values = headers.map(header => record[header] || '');
             
-            // Extract room from house names like "Beach House", "Jungle House", etc.
-            const houseMatch = item.Rental.match(/(Beach House|Jungle House|Double House|New House)/);
-            const house = houseMatch ? houseMatch[1] : '';
-            
-            items.push({
-              rooms: room || house || '',
-              full_name: item.Name,
-              last: item.Name.split(' ').pop(), // Use last word as last name
-              first: item.Name.split(' ')[0], // Use first word as first name
-              guest_last: item.Name.split(' ').pop(),
-              check_in: item.Arrive || null,
-              check_out: item.Depart || null,
-              guests: parseInt(item.Adults || '0') + parseInt(item.Children || '0') || null,
-              expected_guest_count: parseInt(item.Adults || '0') + parseInt(item.Children || '0') || null
-            });
+            const dbObject = parseCSVRowToDBObject(values, headers);
+            if (dbObject.stay_id) {
+              dbRows.push(dbObject);
+            }
           }
+        } catch (csvError) {
+          console.error('CSV parsing failed:', csvError.message);
+          res.statusCode = 400;
+          res.end(JSON.stringify({ ok: false, error: 'CSV parsing failed', details: csvError.message }));
+          return;
         }
       } else {
         // Fallback - try to use existing JSON structure
-        items = feed.json?.items || [];
+        const fallbackItems = feed.json?.items || [];
+        for (const item of fallbackItems) {
+          const dbObject = {
+            stay_id: item.stay_id || null,
+            first_name: item.first_name || item.first || null,
+            last_name: item.last_name || item.last || item.guest_last || null,
+            source: 'tokeet_upsert',
+            raw_json: item
+          };
+          if (dbObject.stay_id) {
+            dbRows.push(dbObject);
+          }
+        }
       }
 
-      const rawRows = [];
+      if (!dbRows.length){ res.setHeader('Content-Type','application/json'); res.end(JSON.stringify({ ok:true, upserted:0 })); return; }
+
+      // Validate and ensure all required fields for insert_incoming_guests RPC are present
+      const validatedRows = dbRows.map(row => {
+        // Ensure all required fields are present, pass null for optional ones
+        const validatedRow = {
+          // Core identity fields (required)
+          stay_id: row.stay_id || null,
+          first_name: row.first_name || null,
+          last_name: row.last_name || null,
+          
+          // Optional identity fields
+          middle_name: row.middle_name || null,
+          gender: row.gender || null,
+          birthday: row.birthday || null,
+          passport_number: row.passport_number || null,
+          nationality_alpha3: row.nationality_alpha3 || null,
+          issuing_country_alpha3: row.issuing_country_alpha3 || null,
+          passport_issue_date: row.passport_issue_date || null,
+          passport_expiry_date: row.passport_expiry_date || null,
+          
+          // Contact information
+          email: row.email || null,
+          secondary_emails: row.secondary_emails || null,
+          phone_e164: row.phone_e164 || null,
+          secondary_phones: row.secondary_phones || null,
+          guest_address: row.guest_address || null,
+          
+          // Booking information
+          booking_status: row.booking_status || null,
+          booking_channel: row.booking_channel || null,
+          rental_unit: row.rental_unit || null,
+          rental_units: row.rental_units || null,
+          check_in_date: row.check_in_date || null,
+          check_out_date: row.check_out_date || null,
+          nights: row.nights || null,
+          date_received: row.date_received || null,
+          checkin_time: row.checkin_time || null,
+          checkout_time: row.checkout_time || null,
+          booking_id: row.booking_id || null,
+          inquiry_id: row.inquiry_id || null,
+          external_reservation_id: row.external_reservation_id || null,
+          adults: row.adults || null,
+          children: row.children || null,
+          currency: row.currency || null,
+          total_cost: row.total_cost || null,
+          base_rate: row.base_rate || null,
+          tax: row.tax || null,
+          booking_formula: row.booking_formula || null,
+          guest_id: row.guest_id || null,
+          
+          // Document verification fields
+          mrz_full: row.mrz_full || null,
+          mrz_hash: row.mrz_hash || null,
+          ocr_confidence: row.ocr_confidence || null,
+          
+          // Communication fields
+          whatsapp_chat_id: row.whatsapp_chat_id || null,
+          whatsapp_group_id: row.whatsapp_group_id || null,
+          
+          // Media and system fields
+          photo_urls: Array.isArray(row.photo_urls) ? row.photo_urls.filter(Boolean) : [],
+          source: row.source || 'tokeet_upsert',
+          source_batch_id: row.source_batch_id || null,
+          status: row.status || 'pending_review',
+          notes: row.notes || null,
+          raw_json: row.raw_json || row,
+          row_type: row.row_type || 'booking',
+          guest_index: row.guest_index || null,
+          nickname: row.nickname || null
+        };
+        return validatedRow;
+      });
+
+      // Try RPC first with complete mapped objects
+      const rpcPayload = { rows: validatedRows };
+      const rpc = await fetch(`${SUPABASE_URL}/rest/v1/rpc/insert_incoming_guests`, {
+        method:'POST', headers: baseHeaders, body: JSON.stringify(rpcPayload)
+      });
       
-      // First pass: normalize each item individually
-      for (const it of items){
-        const label = `${(it.rooms||'').toString()} ${(it.last||it.guest_last||'').toString()}`.trim();
-        const r = normalizeStayIdFreeform(label);
-        if (!r.stay_id) continue;
-        
-        rawRows.push({
-          ...r,
-          original_item: it,
-          raw_last_name: (it.last||it.guest_last||'').toString().trim()
-        });
+      if (rpc.ok){ 
+        const text = await rpc.text(); 
+        // Wrap RPC response in expected envelope format
+        let rpcData;
+        try { rpcData = JSON.parse(text || '[]'); } catch { rpcData = []; }
+        const inserted = Array.isArray(rpcData) ? rpcData.length : validatedRows.length;
+        res.setHeader('Content-Type','application/json'); 
+        res.statusCode=200; 
+        res.end(JSON.stringify({ ok:true, via:'rpc', inserted, rows: rpcData })); 
+        return; 
       }
 
-      // Second pass: merge rooms for guests with same last name
-      const guestsByLastName = {};
-      rawRows.forEach(row => {
-        // Remove spaces from last name for comparison
-        const cleanLastName = row.raw_last_name.replace(/\s+/g, '');
-        if (!guestsByLastName[cleanLastName]) {
-          guestsByLastName[cleanLastName] = [];
-        }
-        guestsByLastName[cleanLastName].push(row);
-      });
-
-      const guestRows = [];
-      Object.entries(guestsByLastName).forEach(([cleanLastName, guestRows_temp]) => {
-        if (guestRows_temp.length === 1) {
-          // Single guest - create one guest record
-          const row = guestRows_temp[0];
-          const roomsPart = row.rooms.join('_');
-          const stay_id = roomsPart ? `${roomsPart}_${row.last_name_canonical}` : row.last_name_canonical;
-          
-          guestRows.push({
-            stay_id,
-            first_name: cap1(row.original_item.first) || cap1(row.original_item.full_name?.split(" ")[0]) || "",
-            last_name: row.last_name_canonical,
-            source: 'tokeet_upsert'
-          });
-        } else {
-          // Multiple guests with same last name - merge rooms, create one guest record
-          const allRooms = [];
-          let sampleItem = null;
-          
-          guestRows_temp.forEach(row => {
-            allRooms.push(...row.rooms);
-            if (!sampleItem) sampleItem = row.original_item;
-          });
-          
-          // Remove duplicates and sort by room order
-          const uniqueRooms = Array.from(new Set(allRooms));
-          uniqueRooms.sort((a,b) => ROOM_ORDER.indexOf(a) - ROOM_ORDER.indexOf(b));
-          
-          const stay_id = uniqueRooms.length ? `${uniqueRooms.join("_")}_${guestRows_temp[0].last_name_canonical}` : guestRows_temp[0].last_name_canonical;
-          
-          guestRows.push({
-            stay_id,
-            first_name: cap1(sampleItem.first) || cap1(sampleItem.full_name?.split(" ")[0]) || "",
-            last_name: guestRows_temp[0].last_name_canonical,
-            source: 'tokeet_upsert'
-          });
-        }
-      });
-
-      if (!guestRows.length){ res.setHeader('Content-Type','application/json'); res.end(JSON.stringify({ ok:true, upserted:0 })); return; }
-
-      // Insert into incoming_guests table instead of stays_preseed
+      // Fallback to direct table insert if RPC fails
       const put = await fetch(`${SUPABASE_URL}/rest/v1/incoming_guests`, {
-        method:'POST', headers:{ ...baseHeaders, Prefer:'resolution=merge-duplicates' }, body: JSON.stringify(guestRows)
+        method:'POST', headers:{ ...baseHeaders, Prefer:'resolution=merge-duplicates' }, body: JSON.stringify(validatedRows)
       });
       const txt = await put.text();
-      if (!put.ok){ res.statusCode=put.status; res.end(JSON.stringify({ ok:false, error:'upsert failed', body:txt })); return; }
-      res.setHeader('Content-Type','application/json'); res.end(JSON.stringify({ ok:true, upserted: guestRows.length })); return;
+      if (!put.ok){ res.statusCode=put.status; res.end(JSON.stringify({ ok:false, error:'upsert failed via both RPC and table', rpc_status: rpc.status, table_body:txt })); return; }
+      res.setHeader('Content-Type','application/json'); res.end(JSON.stringify({ ok:true, via:'table_fallback', upserted: validatedRows.length })); return;
     }catch(e){ res.statusCode=500; res.end(JSON.stringify({ ok:false, error:e.message||'tokeet-upsert error' })); return; }
   }
 
@@ -861,6 +1622,12 @@ async function handlePassportUpsertOrMerge(passportData) {
         p_birthday: passportData.birthday || null,
         p_passport_number: passportData.passport_number || '',
         p_nationality_alpha3: passportData.nationality_alpha3 || '',
+        p_issuing_country_alpha3: passportData.issuing_country_alpha3 || '',
+        p_passport_issue_date: passportData.passport_issue_date || null,
+        p_passport_expiry_date: passportData.passport_expiry_date || null,
+        p_mrz_full: passportData.mrz_full || '',
+        p_mrz_hash: passportData.mrz_hash || '',
+        p_ocr_confidence: passportData.ocr_confidence || null,
         p_photo_urls: passportData.photo_urls || [],
         p_source: passportData.source || ''
       })

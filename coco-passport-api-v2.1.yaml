@@ -1,0 +1,272 @@
+openapi: 3.1.0
+info:
+  title: Coconut Passport Proxy - CocoGPT Integration
+  version: 2.1.0
+  description: |
+    Clean API for CocoGPT passport processing integration with MRZ-first processing.
+    Processes multiple passport photos per stay with intelligent merging and TM30 Immigration format output.
+    
+    Key Features:
+    - MRZ-based name extraction (more reliable than manual entry)
+    - Automatic Google Sheets format generation for TM30 Immigration forms
+    - Optional photo processing (local file paths safely filtered out)
+    - Intelligent stay_id normalization and fallback generation
+servers:
+  - url: https://coco-passport-proxy.vercel.app
+security: []
+paths:
+  /coco-gpt-batch-passport:
+    post:
+      operationId: batchProcessPassports
+      summary: Process multiple passport photos for a single stay (MRZ-optimized)
+      description: |
+        Process multiple passports with MRZ-first parsing for reliable name extraction.
+        
+        Send MRZ data with single \n between lines. API extracts names automatically and returns ready-to-use Google Sheets format.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BatchPassportRequest"
+            examples:
+              mrz_based:
+                summary: MRZ-based processing (recommended)
+                value:
+                  stay_id: "B7_Kislinger"
+                  passports:
+                    - mrz_full: "P<DEUKISLINGER<<STEFAN<<<<<<<<<<<<<<<<<<<<<\n1234567890DEU9001011M2501017<<<<<<<<<<<<<<6"
+                      passport_number: "123456789"
+                      nationality_alpha3: "DEU"
+                      gender: "M"
+                      birthday: "1990-01-01"
+                      ocr_confidence: 0.95
+              fallback:
+                summary: Fallback when MRZ unavailable
+                value:
+                  stay_id: "B7_Kislinger"
+                  passports:
+                    - first_name: "Stefan"
+                      last_name: "Kislinger"
+                      passport_number: "123456789"
+                      nationality_alpha3: "DEU"
+                      gender: "M"
+                      birthday: "1990-01-01"
+      responses:
+        "200":
+          description: Batch processing results with TM30 Immigration format
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BatchPassportResponse"
+              examples:
+                success:
+                  summary: Successful processing with Google Sheets data
+                  value:
+                    success: true
+                    stay_id: "B7_Kislinger"
+                    summary:
+                      total: 1
+                      merged: 0
+                      inserted: 1
+                      errors: 0
+                    results:
+                      - index: 0
+                        status: "success"
+                        action: "inserted"
+                        first_name: "Stefan"
+                        passport_number: "123456789"
+                    sheets_format:
+                      description: "Tab-delimited format ready for Google Sheets"
+                      columns: ["First Name", "Middle Name", "Last Name", "Gender", "Passport Number", "Nationality", "Birthday"]
+                      data: "First Name\tMiddle Name\tLast Name\tGender *\tPassport No. *\tNationality *\tBirth Date (DD/MM/YYYY)\tCheck-out Date (DD/MM/YYYY)\tPhone No.\nStefan\t\tKislinger\tM\t123456789\tDEU\t01/01/1990\t\t"
+                      rows_count: 1
+        "400":
+          description: Invalid request format
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                  note:
+                    type: string
+                    example: "photo_urls are optional - you can omit them or pass local file paths (they will be filtered out)"
+                  expected_format:
+                    $ref: "#/components/schemas/BatchPassportRequest"
+components:
+  schemas:
+    BatchPassportRequest:
+      type: object
+      required:
+        - passports
+      properties:
+        stay_id:
+          type: string
+          description: |
+            The stay identifier (optional - auto-generated if missing).
+            Will be normalized using room/guest name extraction if provided.
+          example: "B7_Kislinger"
+        passports:
+          type: array
+          description: Array of passport data from OCR processing
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/PassportData"
+    PassportData:
+      type: object
+      description: |
+        Passport data with MRZ-first processing support.
+        
+        **Recommended:** Provide mrz_full and let API extract names automatically.
+        **Fallback:** Provide first_name explicitly if MRZ unavailable.
+      properties:
+        mrz_full:
+          type: string
+          description: |
+            Full MRZ string from passport OCR (RECOMMENDED).
+            **CRITICAL:** Join the two MRZ lines with a single \n character (not \r\n or space) to avoid cross-platform newline issues.
+            API will extract first_name, last_name, and issuing_country automatically.
+          example: "P<DEUKISLINGER<<STEFAN<<<<<<<<<<<<<<<<<<<<<\n1234567890DEU9001011M2501017<<<<<<<<<<<<<<6"
+        first_name:
+          type: string
+          description: |
+            Guest's first name (required if MRZ unavailable).
+            If mrz_full provided, this will be extracted automatically.
+          example: "Stefan"
+        middle_name:
+          type: string
+          description: Guest's middle name (optional)
+        last_name:
+          type: string
+          description: |
+            Guest's last name (auto-extracted from MRZ if available).
+          example: "Kislinger"
+        gender:
+          type: string
+          enum:
+            - "M"
+            - "F"
+            - ""
+          description: Gender (M/F or empty)
+        birthday:
+          type: string
+          description: Birth date in YYYY-MM-DD format
+          example: "1990-01-01"
+        passport_number:
+          type: string
+          description: Passport number from OCR
+          example: "123456789"
+        nationality_alpha3:
+          type: string
+          description: Nationality as 3-letter ISO code
+          example: "DEU"
+        issuing_country_alpha3:
+          type: string
+          description: |
+            Passport issuing country (auto-extracted from MRZ if available).
+          example: "DEU"
+        passport_issue_date:
+          type: string
+          description: Passport issue date (YYYY-MM-DD)
+          example: "2015-01-01"
+        passport_expiry_date:
+          type: string
+          description: Passport expiry date (YYYY-MM-DD)
+          example: "2025-01-01"
+        mrz_hash:
+          type: string
+          description: SHA-256 hash of MRZ (auto-generated if not provided)
+        ocr_confidence:
+          type: number
+          description: OCR confidence (0-1 or 0-100, auto-normalized)
+          example: 0.95
+        photo_urls:
+          type: array
+          items:
+            type: string
+          description: |
+            URLs to passport photo images (OPTIONAL).
+            Local file paths (e.g. /mnt/data/...) are safely filtered out.
+            Only http/https URLs will be processed.
+          example:
+            - "https://example.com/passport1.jpg"
+      anyOf:
+        - required: ["mrz_full"]
+        - required: ["first_name"]
+    BatchPassportResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Overall operation success
+        stay_id:
+          type: string
+          description: The processed stay ID (normalized or auto-generated)
+        summary:
+          type: object
+          properties:
+            total:
+              type: integer
+              description: Total passports processed
+            merged:
+              type: integer
+              description: Passports merged into existing records
+            inserted:
+              type: integer
+              description: New passport records inserted
+            errors:
+              type: integer
+              description: Passports that failed processing
+        results:
+          type: array
+          description: Detailed results for each passport
+          items:
+            type: object
+            properties:
+              index:
+                type: integer
+                description: Index of passport in original array
+              status:
+                type: string
+                enum:
+                  - "success"
+                  - "error"
+              action:
+                type: string
+                enum:
+                  - "merged"
+                  - "inserted"
+              first_name:
+                type: string
+                description: Final processed first name (extracted from MRZ if available)
+              passport_number:
+                type: string
+              error:
+                type: string
+                description: Error message if status is 'error'
+        sheets_format:
+          type: object
+          description: |
+            Ready-to-use Google Sheets data for TM30 Immigration forms.
+            Names reflect MRZ-extracted values for accuracy.
+          properties:
+            description:
+              type: string
+              example: "Tab-delimited format ready for Google Sheets"
+            columns:
+              type: array
+              items:
+                type: string
+              example: ["First Name", "Middle Name", "Last Name", "Gender", "Passport Number", "Nationality", "Birthday"]
+            data:
+              type: string
+              description: |
+                Tab-delimited data with TM30 Immigration headers.
+                Dates formatted as DD/MM/YYYY for Thailand immigration requirements.
+                Names extracted from MRZ when available for accuracy.
+              example: "First Name\tMiddle Name\tLast Name\tGender *\tPassport No. *\tNationality *\tBirth Date (DD/MM/YYYY)\tCheck-out Date (DD/MM/YYYY)\tPhone No.\nStefan\t\tKislinger\tM\t123456789\tDEU\t01/01/1990\t\t"
+            rows_count:
+              type: integer
+              description: Number of successfully processed passport rows

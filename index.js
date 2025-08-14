@@ -612,19 +612,73 @@ module.exports = async (req, res) => {
       if (!feed.ok){ res.statusCode=feed.status||500; res.end(JSON.stringify({ ok:false, error:'fetch feed failed', body: feed.text })); return; }
 
       const items = Array.isArray(feed.json) ? feed.json : (feed.json?.items || []);
-      const rows=[];
+      const rawRows = [];
+      
+      // First pass: normalize each item individually
       for (const it of items){
         const label = `${(it.rooms||'').toString()} ${(it.last||it.guest_last||'').toString()}`.trim();
         const r = normalizeStayIdFreeform(label);
-        const stay_id = r.stay_id; if (!stay_id) continue;
-        rows.push({
-          stay_id,
-          rooms: Array.isArray(r.rooms) ? r.rooms : [],
-          check_in: it.check_in || null,
-          check_out: it.check_out || null,
-          expected_guest_count: it.expected_guest_count ?? it.guests ?? null
+        if (!r.stay_id) continue;
+        
+        rawRows.push({
+          ...r,
+          original_item: it,
+          raw_last_name: (it.last||it.guest_last||'').toString().trim()
         });
       }
+
+      // Second pass: merge rooms for guests with same last name
+      const guestsByLastName = {};
+      rawRows.forEach(row => {
+        // Remove spaces from last name for comparison
+        const cleanLastName = row.raw_last_name.replace(/\s+/g, '');
+        if (!guestsByLastName[cleanLastName]) {
+          guestsByLastName[cleanLastName] = [];
+        }
+        guestsByLastName[cleanLastName].push(row);
+      });
+
+      const rows = [];
+      Object.entries(guestsByLastName).forEach(([cleanLastName, guestRows]) => {
+        if (guestRows.length === 1) {
+          // Single guest - use existing stay_id but fix last name spaces
+          const row = guestRows[0];
+          const roomsPart = row.rooms.join('_');
+          const stay_id = roomsPart ? `${roomsPart}_${cleanLastName}` : cleanLastName;
+          
+          rows.push({
+            stay_id,
+            rooms: row.rooms,
+            check_in: row.original_item.check_in || null,
+            check_out: row.original_item.check_out || null,
+            expected_guest_count: row.original_item.expected_guest_count ?? row.original_item.guests ?? null
+          });
+        } else {
+          // Multiple guests with same last name - merge rooms
+          const allRooms = [];
+          let sampleItem = null;
+          
+          guestRows.forEach(row => {
+            allRooms.push(...row.rooms);
+            if (!sampleItem) sampleItem = row.original_item;
+          });
+          
+          // Remove duplicates and sort by room order
+          const uniqueRooms = Array.from(new Set(allRooms));
+          uniqueRooms.sort((a,b) => ROOM_ORDER.indexOf(a) - ROOM_ORDER.indexOf(b));
+          
+          const stay_id = uniqueRooms.length ? `${uniqueRooms.join('_')}_${cleanLastName}` : cleanLastName;
+          
+          rows.push({
+            stay_id,
+            rooms: uniqueRooms,
+            check_in: sampleItem.check_in || null,
+            check_out: sampleItem.check_out || null,
+            expected_guest_count: sampleItem.expected_guest_count ?? sampleItem.guests ?? null
+          });
+        }
+      });
+
       if (!rows.length){ res.setHeader('Content-Type','application/json'); res.end(JSON.stringify({ ok:true, upserted:0 })); return; }
 
       const put = await fetch(`${SUPABASE_URL}/rest/v1/stays_preseed`, {

@@ -378,7 +378,6 @@ function parseMRZ(mrzString) {
               }
             }
           }
-          }
         }
         
         return {

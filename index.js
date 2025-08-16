@@ -291,12 +291,19 @@ function parseMRZ(mrzString) {
         const nameSection = rawNameSection.replace(/</g, ' ').trim();
         const nameParts = nameSection.split(/\s+/).filter(Boolean);
         
-        // Extract gender and birthdate from second line if available (TD3 format)
+        // Extract passport number, gender and birthdate from second line if available (TD3 format)
+        let passportNumber = null;
         let gender = null;
         let birthdate = null;
+        let expiryDate = null;
         if (lines.length >= 2) {
           const line2 = lines[1];
           if (line2 && line2.length > 20) {
+            // Positions 0-8 contain passport number (remove trailing <)
+            if (line2.length >= 9) {
+              passportNumber = line2.substring(0, 9).replace(/</g, '').trim();
+            }
+            
             // Position 20 contains gender (M/F/X)
             const genderChar = line2.charAt(20);
             if (genderChar === 'M' || genderChar === 'F' || genderChar === 'X') {
@@ -321,6 +328,25 @@ function parseMRZ(mrzString) {
                 }
               }
             }
+            
+            // Positions 21-26 contain expiry date in YYMMDD format
+            if (line2.length >= 27) {
+              const expiryStr = line2.substring(21, 27); // YYMMDD
+              if (/^\d{6}$/.test(expiryStr)) {
+                const year = parseInt(expiryStr.substring(0, 2));
+                const month = parseInt(expiryStr.substring(2, 4));
+                const day = parseInt(expiryStr.substring(4, 6));
+                
+                // Convert 2-digit year to 4-digit (assume 20xx for years 00-30, 19xx for 31-99)
+                const fullYear = year <= 30 ? 2000 + year : 1900 + year;
+                
+                // Validate date components
+                if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+                  // Format as YYYY-MM-DD
+                  expiryDate = `${fullYear}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
+                }
+              }
+            }
           }
         }
         
@@ -332,8 +358,10 @@ function parseMRZ(mrzString) {
           nameParts: nameParts,
           lastName: lastName,
           firstName: firstName,
+          passportNumber: passportNumber,
           gender: gender,
           birthdate: birthdate,
+          expiryDate: expiryDate,
           raw: mrz
         };
       }
@@ -975,7 +1003,23 @@ module.exports = async (req, res) => {
   if (req.method === 'POST' && url.pathname === '/coco-gpt-batch-passport') {
     try {
       const body = await parseBody(req).catch(() => ({}));
-      const { stay_id, passports } = body;
+      const { stay_id, passports, mrz_list } = body;
+      
+      // Handle mrz_list format from CocoGPT YAML (array of MRZ line pairs)
+      let passportsToProcess = passports;
+      if (mrz_list && Array.isArray(mrz_list) && mrz_list.length > 0) {
+        // Convert mrz_list format to passports format
+        passportsToProcess = mrz_list.map(mrzLines => {
+          if (Array.isArray(mrzLines) && mrzLines.length === 2) {
+            // Join the two MRZ lines with a newline
+            const mrzFull = mrzLines.join('\n');
+            return {
+              mrz_full: mrzFull
+            };
+          }
+          return {};
+        });
+      }
       
       // Be more permissive with stay_id - auto-normalize if provided, allow empty for basic processing
       let normalizedStayId = stay_id;
@@ -987,35 +1031,41 @@ module.exports = async (req, res) => {
         // If normalization fails, keep original - let the database decide
       }
       
-      if (!Array.isArray(passports) || passports.length === 0) {
+      if ((!Array.isArray(passportsToProcess) || passportsToProcess.length === 0) && !mrz_list) {
         res.statusCode = 400;
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({ 
-          error: "passports array is required",
-          expected_format: {
-            stay_id: "B7_Kislinger (optional - will be auto-normalized)",
-            passports: [
-              {
-                first_name: "Stefan (required or extracted from MRZ)",
-                last_name: "Kislinger", 
-                passport_number: "P123456",
-                nationality_alpha3: "DEU",
-                mrz_full: "P<DEUKISLINGER<<STEFAN<<<<<<<<<<<<<<<<<<<<",
-                ocr_confidence: 0.95
-                // photo_urls field removed - no longer needed
-              }
-            ]
+          error: "passports array or mrz_list is required",
+          expected_formats: {
+            format1: {
+              stay_id: "B7_Kislinger (optional - will be auto-normalized)",
+              passports: [
+                {
+                  first_name: "Stefan (required or extracted from MRZ)",
+                  last_name: "Kislinger", 
+                  passport_number: "P123456",
+                  nationality_alpha3: "DEU",
+                  mrz_full: "P<DEUKISLINGER<<STEFAN<<<<<<<<<<<<<<<<<<<<<",
+                  ocr_confidence: 0.95
+                }
+              ]
+            },
+            format2_from_cocogpt: {
+              mrz_list: [
+                ["P<DEUKISLINGER<<STEFAN<<<<<<<<<<<<<<<<<<<<<", "1234567890DEU9001014M2301014<<<<<<<<<<<<<<04"]
+              ]
+            }
           }
         }));
-        return; 
+        return;
       }
       
       const results = [];
       let merged = 0, inserted = 0, errors = 0;
       
       // Process each passport in the batch
-      for (let i = 0; i < passports.length; i++) {
-        const passport = passports[i];
+      for (let i = 0; i < passportsToProcess.length; i++) {
+        const passport = passportsToProcess[i];
         
         try {
           // Enhanced validation and processing
@@ -1047,6 +1097,9 @@ module.exports = async (req, res) => {
           let middleName = passport.middle_name || '';
           const lastName = passport.last_name || (mrzData?.valid ? mrzData.lastName : null);
           const birthdateFromMRZ = mrzData?.valid ? mrzData.birthdate : null;
+          
+          // Store original first name for response (before splitting)
+          const originalFirstName = firstName;
           
           // Split firstname if it contains spaces (e.g., "Ralph Can" -> "Ralph" + "Can")
           if (firstName && firstName.includes(' ')) {
@@ -1091,11 +1144,11 @@ module.exports = async (req, res) => {
             last_name: lastName || '', // Use extracted name from MRZ if available
             gender: passport.gender || (mrzData?.valid ? mrzData.gender : '') || '',
             birthday: passport.birthday || birthdateFromMRZ || '',
-            passport_number: passport.passport_number || '',
-            nationality_alpha3: passport.nationality_alpha3 || '',
+            passport_number: passport.passport_number || (mrzData?.valid ? mrzData.passportNumber : '') || '',
+            nationality_alpha3: passport.nationality_alpha3 || (mrzData?.valid ? mrzData.issuingCountry : '') || '',
             issuing_country_alpha3: passport.issuing_country_alpha3 || (mrzData?.issuingCountry) || '',
             passport_issue_date: passport.passport_issue_date || '',
-            passport_expiry_date: passport.passport_expiry_date || '',
+            passport_expiry_date: passport.passport_expiry_date || (mrzData?.valid ? mrzData.expiryDate : '') || '',
             mrz_full: passport.mrz_full || '',
             mrz_hash: mrzHash || '',
             ocr_confidence: ocrValidation?.normalized || passport.ocr_confidence || null,
@@ -1128,7 +1181,7 @@ module.exports = async (req, res) => {
               index: i,
               status: 'success',
               action: mergeResult.action,
-              first_name: firstName, // Use extracted name
+              first_name: originalFirstName, // Return original name for CocoGPT compatibility
               passport_number: passport.passport_number
             });
             
@@ -1164,7 +1217,7 @@ module.exports = async (req, res) => {
         success: true,
         stay_id: normalizedStayId,
         summary: {
-          total: passports.length,
+          total: passportsToProcess.length,
           merged,
           inserted,
           errors

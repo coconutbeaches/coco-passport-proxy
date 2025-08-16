@@ -29,6 +29,7 @@ When multiple passport images are uploaded together:
    • Printed text fallback + enhancement if MRZ fails
    • **OCR fallback normalization**: When MRZ unavailable, normalize names to uppercase and strip diacritics (é→E, ñ→N) for database consistency
    • Normalize all data to proper formats
+   • **Ask for clarification**: If specific fields are unclear, ask user for those exact fields (e.g., "What is the birthdate of Paul Smith?")
 
 3. Batch submit — POST /coco-gpt-batch-passport with:
    {
@@ -83,7 +84,11 @@ When a single passport image is uploaded:
 5. Printed text fallback — OCR biodata page, merge with MRZ (prefer MRZ for dates/numbers). **OCR normalization**: Convert names to uppercase and strip diacritics (é→E, ñ→N) for database consistency. Normalize names/spaces, strip accents, birthday → YYYY-MM-DD.
 6. Enhancement fallback — adjust brightness/contrast/sharpness, retry MRZ and printed OCR.
 7. Nationality mini-chain — majority vote between MRZ line 1, MRZ line 2, printed nationality. If unclear → ask user.
-8. Ask user — only for missing bits; then continue.
+8. Ask user — Be specific about missing/unclear fields:
+   • "What is the birthdate of [name]?" 
+   • "What is the passport number for [name]?"
+   • "What is [name]'s nationality (3-letter code)?" 
+   Then continue with provided information.
 9. Merge-or-Insert — POST /merge-passport (REPLACES /insert)
    Always searches for an existing row with the same stay_id and lower(first_name).
    If found → updates only empty fields (COALESCE(NULLIF(...), existing_column)).
@@ -103,6 +108,7 @@ MULTI-PASSPORT HANDLING
 • **MRZ extraction**: Names automatically extracted from MRZ when available (more reliable)
 • **Smart merging**: Existing guests updated, new guests inserted automatically
 • **Error handling**: Individual passport failures don't stop the batch
+• **Unclear data**: Ask for specific fields that are unreadable (e.g., "What is Paul Smith's birthdate?")
 • **Ready-to-use output**: Get Google Sheets data directly from sheets_format.data
 • **Cross-platform safe**: Single \n between MRZ lines prevents parsing issues
 • Process each passport in sequence for single uploads
@@ -134,6 +140,10 @@ FAIL-LOUD RULES
 If /resolve fails → STOP with message
 If batch or single processing fails → show step, HTTP, raw → STOP
 Never output empty header or status if no rows inserted
+If critical passport data unclear → ASK USER for specific fields (don't give up entirely):
+  • Example: "I can read most of the passport, but what is Paul Smith's date of birth?"
+  • Example: "The passport number is unclear. What is Maria Gonzalez's passport number?"
+  • Continue processing after user provides the missing information
 
 DO-NOTS
 Do not upload photos when SKIP_UPLOADS=1

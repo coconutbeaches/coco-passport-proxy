@@ -278,9 +278,51 @@ function parseMRZ(mrzString) {
         // Extract country code (positions 2-4)
         const issuingCountry = line1.substring(2, 5).replace(/</g, '');
         
-        // Extract name section (positions 5+)
-        const nameSection = line1.substring(5).replace(/</g, ' ').trim();
+        // Extract name section (positions 5+) - parse BEFORE replacing < with spaces
+        const rawNameSection = line1.substring(5);
+        
+        // For passports, the format is LASTNAME<<FIRSTNAME
+        // Split by << first, then clean up each part
+        const fullNameParts = rawNameSection.split('<<').map(part => part.replace(/</g, ' ').trim());
+        const lastName = fullNameParts[0] || null;
+        const firstName = fullNameParts[1] || null;
+        
+        // Also create the cleaned version for backward compatibility
+        const nameSection = rawNameSection.replace(/</g, ' ').trim();
         const nameParts = nameSection.split(/\s+/).filter(Boolean);
+        
+        // Extract gender and birthdate from second line if available (TD3 format)
+        let gender = null;
+        let birthdate = null;
+        if (lines.length >= 2) {
+          const line2 = lines[1];
+          if (line2 && line2.length > 20) {
+            // Position 20 contains gender (M/F/X)
+            const genderChar = line2.charAt(20);
+            if (genderChar === 'M' || genderChar === 'F' || genderChar === 'X') {
+              gender = genderChar;
+            }
+            
+            // Positions 13-18 contain birthdate in YYMMDD format
+            if (line2.length >= 19) {
+              const birthdateStr = line2.substring(13, 19); // YYMMDD
+              if (/^\d{6}$/.test(birthdateStr)) {
+                const year = parseInt(birthdateStr.substring(0, 2));
+                const month = parseInt(birthdateStr.substring(2, 4));
+                const day = parseInt(birthdateStr.substring(4, 6));
+                
+                // Convert 2-digit year to 4-digit (assume 20xx for years 00-30, 19xx for 31-99)
+                const fullYear = year <= 30 ? 2000 + year : 1900 + year;
+                
+                // Validate date components
+                if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+                  // Format as YYYY-MM-DD
+                  birthdate = `${fullYear}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
+                }
+              }
+            }
+          }
+        }
         
         return {
           valid: true,
@@ -288,8 +330,10 @@ function parseMRZ(mrzString) {
           issuingCountry: issuingCountry || null,
           extractedName: nameSection || null,
           nameParts: nameParts,
-          lastName: nameParts[0] || null,
-          firstName: nameParts.slice(1).join(' ') || null,
+          lastName: lastName,
+          firstName: firstName,
+          gender: gender,
+          birthdate: birthdate,
           raw: mrz
         };
       }
@@ -573,7 +617,13 @@ function normalizeStayIdFreeform(raw){
     }
   }
   const lastParts = parts.filter((_,i)=>!used[i]);
-  let lastNameCanonical = lastParts.map(cap1).join('').replace(/[\s-]+/g,'');
+  // Common lastname connectors that should remain lowercase
+  const connectors = ['von', 'van', 'de', 'der', 'den', 'del', 'della', 'di', 'da', 'la', 'le'];
+  let lastNameCanonical = lastParts.map((part, idx) => {
+    const lower = part.toLowerCase();
+    // Keep connectors lowercase, capitalize other parts
+    return connectors.includes(lower) ? lower : cap1(part);
+  }).join('').replace(/[\s-]+/g,'');
   rooms = Array.from(new Set(rooms));
   rooms.sort((a,b)=>ROOM_ORDER.indexOf(a)-ROOM_ORDER.indexOf(b));
   // Ensure stay_id always uses underscores: replace all whitespace with _, collapse multiple _, trim
@@ -942,18 +992,17 @@ module.exports = async (req, res) => {
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({ 
           error: "passports array is required",
-          note: "photo_urls are optional - you can omit them or pass local file paths (they will be filtered out)",
           expected_format: {
-            stay_id: "B7_Kislinger (optional - fallback generated if missing)",
+            stay_id: "B7_Kislinger (optional - will be auto-normalized)",
             passports: [
               {
-                first_name: "Stefan (required)",
+                first_name: "Stefan (required or extracted from MRZ)",
                 last_name: "Kislinger", 
                 passport_number: "P123456",
                 nationality_alpha3: "DEU",
-                mrz_full: "P<DEUKISLINGER<<STEFAN<<<<<<<<<<<<<<<<<<<<<<",
-                ocr_confidence: 0.95,
-                photo_urls: ["https://example.com/photo1.jpg (optional - local paths filtered out)"]
+                mrz_full: "P<DEUKISLINGER<<STEFAN<<<<<<<<<<<<<<<<<<<<",
+                ocr_confidence: 0.95
+                // photo_urls field removed - no longer needed
               }
             ]
           }
@@ -994,8 +1043,21 @@ module.exports = async (req, res) => {
           }
           
           // Extract first_name from MRZ if not provided directly
-          const firstName = passport.first_name || (mrzData?.valid ? mrzData.firstName : null);
+          let firstName = passport.first_name || (mrzData?.valid ? mrzData.firstName : null);
+          let middleName = passport.middle_name || '';
           const lastName = passport.last_name || (mrzData?.valid ? mrzData.lastName : null);
+          const birthdateFromMRZ = mrzData?.valid ? mrzData.birthdate : null;
+          
+          // Split firstname if it contains spaces (e.g., "Ralph Can" -> "Ralph" + "Can")
+          if (firstName && firstName.includes(' ')) {
+            const nameParts = firstName.trim().split(/\s+/);
+            firstName = nameParts[0]; // First part becomes firstname
+            // Remaining parts become middle name (combine with existing middle name if any)
+            const extractedMiddle = nameParts.slice(1).join(' ');
+            if (extractedMiddle) {
+              middleName = middleName ? `${extractedMiddle} ${middleName}` : extractedMiddle;
+            }
+          }
           
           // Validate that we have at least a first name (from input or MRZ)
           if (!firstName) {
@@ -1021,14 +1083,14 @@ module.exports = async (req, res) => {
           }
           
           // Prepare passport data with normalized stay_id and source
-          // Note: photo_urls are optional - CocoGPT can process passports without needing to upload images
+          // Photo URLs are no longer processed - CocoGPT only sends MRZ data
           const passportData = {
             stay_id: normalizedStayId || stay_id || `unknown_${Date.now()}`, // Fallback for missing stay_id
             first_name: firstName, // Use extracted name from MRZ if available
-            middle_name: passport.middle_name || '',
+            middle_name: middleName, // Use split middle name if extracted from firstname
             last_name: lastName || '', // Use extracted name from MRZ if available
-            gender: passport.gender || '',
-            birthday: passport.birthday || '',
+            gender: passport.gender || (mrzData?.valid ? mrzData.gender : '') || '',
+            birthday: passport.birthday || birthdateFromMRZ || '',
             passport_number: passport.passport_number || '',
             nationality_alpha3: passport.nationality_alpha3 || '',
             issuing_country_alpha3: passport.issuing_country_alpha3 || (mrzData?.issuingCountry) || '',
@@ -1037,11 +1099,7 @@ module.exports = async (req, res) => {
             mrz_full: passport.mrz_full || '',
             mrz_hash: mrzHash || '',
             ocr_confidence: ocrValidation?.normalized || passport.ocr_confidence || null,
-            photo_urls: Array.isArray(passport.photo_urls) ? passport.photo_urls.filter(url => {
-              // Only include URLs that are accessible (start with http/https)
-              // Skip local file paths like /mnt/data/...
-              return typeof url === 'string' && url.match(/^https?:\/\//)
-            }) : [],
+            photo_urls: [], // Always empty - photos no longer needed from CocoGPT
             source: 'coco_gpt_batch'
           };
           
@@ -1099,66 +1157,20 @@ module.exports = async (req, res) => {
         }
       }
       
-      // Generate Google Sheets formatted output for TM30 Immigration format
-      let sheetsOutput = 'First Name \tMiddle Name\tLast Name\tGender *\tPassport No. *\tNationality *\tBirth Date (DD/MM/YYYY)\tCheck-out Date (DD/MM/YYYY)\tPhone No.';
-      const successfulPassports = results.filter(r => r.status === 'success');
-      
-      for (const result of successfulPassports) {
-        const originalPassport = passports[result.index];
-        
-        // Extract names from MRZ if available, fallback to original input
-        let firstName = originalPassport.first_name || '';
-        let lastName = originalPassport.last_name || '';
-        
-        if (originalPassport.mrz_full) {
-          const mrzData = parseMRZ(originalPassport.mrz_full);
-          if (mrzData.valid) {
-            firstName = mrzData.firstName || firstName;
-            lastName = mrzData.lastName || lastName;
-          }
-        }
-        
-        const middleName = originalPassport.middle_name || '';
-        const gender = originalPassport.gender || '';
-        const passportNumber = originalPassport.passport_number || '';
-        const nationality = originalPassport.nationality_alpha3 || '';
-        
-        // Convert birthday from YYYY-MM-DD to DD/MM/YYYY format
-        let birthdayFormatted = '';
-        if (originalPassport.birthday) {
-          const dateMatch = originalPassport.birthday.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-          if (dateMatch) {
-            const [, year, month, day] = dateMatch;
-            birthdayFormatted = `${day}/${month}/${year}`;
-          } else {
-            birthdayFormatted = originalPassport.birthday; // Use as-is if not in expected format
-          }
-        }
-        
-        // For now, leave check-out date and phone empty (to be filled manually)
-        const checkoutDate = '';
-        const phoneNo = '';
-        
-        sheetsOutput += `\n${firstName}\t${middleName}\t${lastName}\t${gender}\t${passportNumber}\t${nationality}\t${birthdayFormatted}\t${checkoutDate}\t${phoneNo}`;
-      }
+      // Google Sheets output removed - data now exported directly from Supabase via daily TM30 export
       
       res.setHeader('Content-Type', 'application/json');
       res.end(JSON.stringify({
         success: true,
-        stay_id,
+        stay_id: normalizedStayId,
         summary: {
           total: passports.length,
           merged,
           inserted,
           errors
         },
-        results,
-        sheets_format: {
-          description: 'Tab-delimited format ready for Google Sheets',
-          columns: ['First Name', 'Middle Name', 'Last Name', 'Gender', 'Passport Number', 'Nationality', 'Birthday'],
-          data: sheetsOutput,
-          rows_count: successfulPassports.length
-        }
+        results
+        // sheets_format removed - use Supabase daily TM30 export instead
       }));
       
     } catch (err) {

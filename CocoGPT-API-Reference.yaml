@@ -1,0 +1,357 @@
+openapi: 3.1.0
+info:
+  title: CocoGPT Passport Proxy API
+  description: Production API for batch passport processing with MRZ-first approach
+  version: "2.0.0"
+  contact:
+    name: Tyler @ Coconut Beach
+    
+servers:
+  - url: https://coco-passport-proxy.vercel.app
+    description: Production server
+
+paths:
+  /coco-gpt-batch-passport:
+    post:
+      operationId: processBatchPassports
+      summary: Process batch of passports with MRZ data
+      description: |
+        Primary endpoint for CocoGPT passport processing. Processes multiple passports, extracts names from MRZ automatically, smart merge/insert updates existing guests, generates Google Sheets TM30 format. MRZ Format Critical: Two lines joined by \n
+        
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - stay_id
+                - passports
+              properties:
+                stay_id:
+                  type: string
+                  description: Guest stay identifier (auto-normalized)
+                  example: "B7_Kislinger"
+                passports:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    properties:
+                      mrz_full:
+                        type: string
+                        description: |
+                          **REQUIRED:** Two-line MRZ data joined by single \n
+                          Names extracted automatically from this field
+                        example: "P<DEUKISLINGER<<STEFAN<<<<<<<<<<<<<<<<<<<<<<\nP123456789DEU8503151M2503156<<<<<<<<<<<<<<<2"
+                      first_name:
+                        type: string
+                        description: "Optional if extractable from MRZ"
+                        example: "Stefan"
+                      last_name:
+                        type: string
+                        description: "Optional if extractable from MRZ" 
+                        example: "Kislinger"
+                      passport_number:
+                        type: string
+                        example: "P123456789"
+                      nationality_alpha3:
+                        type: string
+                        description: "3-letter country code"
+                        example: "DEU"
+                      ocr_confidence:
+                        type: number
+                        minimum: 0
+                        maximum: 1
+                        description: "OCR confidence (0-1 or 0-100, auto-normalized)"
+                        example: 0.95
+                      gender:
+                        type: string
+                        enum: [M, F, X]
+                        example: "M"
+                      birthday:
+                        type: string
+                        format: date
+                        example: "1985-03-15"
+                      photo_urls:
+                        type: array
+                        description: "Optional: Public HTTP/HTTPS URLs only (local paths filtered out)"
+                        items:
+                          type: string
+                          format: uri
+                        example: ["https://example.com/passport1.jpg"]
+            examples:
+              mrz_only:
+                summary: "MRZ-only (recommended)"
+                description: "Names extracted from MRZ, minimal payload"
+                value:
+                  stay_id: "B7_Kislinger"
+                  passports:
+                    - mrz_full: "P<DEUKISLINGER<<STEFAN<<<<<<<<<<<<<<<<<<<<<<\nP123456789DEU8503151M2503156<<<<<<<<<<<<<<<2"
+                      ocr_confidence: 0.95
+              with_names:
+                summary: "With explicit names"
+                description: "Fallback if MRZ parsing fails"
+                value:
+                  stay_id: "B7_Kislinger"
+                  passports:
+                    - mrz_full: "P<DEUKISLINGER<<STEFAN<<<<<<<<<<<<<<<<<<<<<<\nP123456789DEU8503151M2503156<<<<<<<<<<<<<<<2"
+                      first_name: "Stefan"
+                      last_name: "Kislinger"
+                      passport_number: "P123456789"
+                      nationality_alpha3: "DEU"
+                      ocr_confidence: 0.95
+              batch_processing:
+                summary: "Multiple passports"
+                description: "Family with multiple passports"
+                value:
+                  stay_id: "A4_A5_DePrest"
+                  passports:
+                    - mrz_full: "P<BELDRE<<PREST<<MARIA<<<<<<<<<<<<<<<<<<<<\nP987654321BEL9007221F2507226<<<<<<<<<<<<<<<4"
+                      ocr_confidence: 0.92
+                    - mrz_full: "P<BELDRE<<PREST<<HANS<<<<<<<<<<<<<<<<<<<<<<\nP456789123BEL1012055M2512052<<<<<<<<<<<<<<<8"
+                      ocr_confidence: 0.88
+                      
+      responses:
+        200:
+          description: Batch processing completed (may include individual errors)
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - success
+                  - stay_id
+                  - summary
+                  - results
+                  - sheets_format
+                properties:
+                  success:
+                    type: boolean
+                    description: "True if batch was processed (individual passports may fail)"
+                  stay_id:
+                    type: string
+                    example: "B7_Kislinger"
+                  summary:
+                    type: object
+                    properties:
+                      total:
+                        type: integer
+                        example: 3
+                      merged:
+                        type: integer
+                        description: "Updated existing records"
+                        example: 1
+                      inserted:
+                        type: integer
+                        description: "New records created"
+                        example: 2
+                      errors:
+                        type: integer
+                        description: "Failed passport processes"
+                        example: 0
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        index:
+                          type: integer
+                        status:
+                          type: string
+                          enum: [success, error]
+                        action:
+                          type: string
+                          enum: [merged, inserted]
+                        first_name:
+                          type: string
+                        passport_number:
+                          type: string
+                        error:
+                          type: string
+                          description: "Present if status=error"
+                  sheets_format:
+                    type: object
+                    description: "Ready-to-use Google Sheets TM30 format"
+                    properties:
+                      description:
+                        type: string
+                        example: "Tab-delimited format ready for Google Sheets"
+                      columns:
+                        type: array
+                        items:
+                          type: string
+                        example: ["First Name", "Middle Name", "Last Name", "Gender", "Passport Number", "Nationality", "Birthday"]
+                      data:
+                        type: string
+                        description: "**Copy this directly into Google Sheets**"
+                        example: "First Name \tMiddle Name\tLast Name\tGender *\tPassport No. *\tNationality *\tBirth Date (DD/MM/YYYY)\tCheck-out Date (DD/MM/YYYY)\tPhone No.\nStefan\t\tKislinger\tM\tP123456789\tDEU\t15/03/1985\t\t"
+                      rows_count:
+                        type: integer
+                        example: 1
+              example:
+                success: true
+                stay_id: "B7_Kislinger"
+                summary:
+                  total: 1
+                  merged: 1
+                  inserted: 0
+                  errors: 0
+                results:
+                  - index: 0
+                    status: "success"
+                    action: "merged"
+                    first_name: "Stefan"
+                    passport_number: "P123456789"
+                sheets_format:
+                  description: "Tab-delimited format ready for Google Sheets"
+                  columns: ["First Name", "Middle Name", "Last Name", "Gender", "Passport Number", "Nationality", "Birthday"]
+                  data: "First Name \tMiddle Name\tLast Name\tGender *\tPassport No. *\tNationality *\tBirth Date (DD/MM/YYYY)\tCheck-out Date (DD/MM/YYYY)\tPhone No.\nStefan\t\tKislinger\tM\tP123456789\tDEU\t15/03/1985\t\t"
+                  rows_count: 1
+                  
+        400:
+          description: Invalid request (missing required fields, malformed MRZ, etc.)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: "passports array is required"
+                  expected_format:
+                    type: object
+                    description: "Example of correct request format"
+                    
+        500:
+          description: Server error (database issues, etc.)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: "Database connection failed"
+
+  /resolve:
+    get:
+      operationId: resolveStayId
+      summary: Normalize stay_id format
+      description: "Utility endpoint to validate and normalize stay_id strings"
+      parameters:
+        - name: stay_id
+          in: query
+          required: true
+          schema:
+            type: string
+          example: "B7 Kislinger"
+      responses:
+        200:
+          description: Normalized stay_id components
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  input:
+                    type: string
+                    example: "B7 Kislinger"
+                  stay_id:
+                    type: string
+                    example: "B7_Kislinger"
+                  rooms:
+                    type: array
+                    items:
+                      type: string
+                    example: ["B7"]
+                  last_name_canonical:
+                    type: string
+                    example: "Kislinger"
+
+  /export:
+    get:
+      operationId: exportPassportData
+      summary: Export current TM30 data for stay
+      description: "Get tab-delimited TM30 format for existing passport data"
+      parameters:
+        - name: stay_id
+          in: query
+          required: true
+          schema:
+            type: string
+          example: "B7_Kislinger"
+      responses:
+        200:
+          description: Tab-delimited data ready for Google Sheets
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: |
+                First Name	Middle Name	Last Name	Gender	Passport Number	Nationality	Birthday
+                Stefan		Kislinger	M	P123456789	DEU	15/03/1985
+
+  /status:
+    get:
+      operationId: getPassportStatus
+      summary: Get passport status summary
+      description: "One-line status summary for guest stay"
+      parameters:
+        - name: stay_id
+          in: query
+          required: true
+          schema:
+            type: string
+          example: "B7_Kislinger"
+      responses:
+        200:
+          description: Status summary
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: "3 of 3 passports received ✅"
+
+components:
+  schemas:
+    PassportData:
+      type: object
+      description: "Individual passport data in batch request"
+      properties:
+        mrz_full:
+          type: string
+          description: "Two-line MRZ joined by \\n - CRITICAL FOR NAME EXTRACTION"
+        first_name:
+          type: string
+          description: "Optional if MRZ provided"
+        last_name:
+          type: string 
+          description: "Optional if MRZ provided"
+        passport_number:
+          type: string
+        nationality_alpha3:
+          type: string
+        ocr_confidence:
+          type: number
+        gender:
+          type: string
+          enum: [M, F, X]
+        birthday:
+          type: string
+          format: date
+        photo_urls:
+          type: array
+          items:
+            type: string
+            format: uri
+          description: "Public URLs only - local paths filtered out"
+
+# Integration Notes for CocoGPT:
+# 
+# 1. **Single API Call:** Use /coco-gpt-batch-passport for all passport processing
+# 2. **MRZ Critical:** Always include mrz_full with proper \n newlines 
+# 3. **Names Optional:** API extracts from MRZ automatically
+# 4. **Ready Output:** Copy sheets_format.data directly to Google Sheets
+# 5. **Error Handling:** Individual passport failures don't stop batch processing
+# 6. **Production Ready:** Full database integration, smart merging, TM30 format

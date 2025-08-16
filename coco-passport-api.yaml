@@ -1,0 +1,54 @@
+# CocoGPT Passport Processing API Reference
+
+endpoint: "https://coco-passport-proxy.vercel.app/coco-gpt-batch-passport"
+method: POST
+
+# Simplified MRZ-based payload (recommended)
+request_mrz_based:
+  stay_id: "B7_Kislinger"  # optional - auto-generated if missing
+  passports:
+    - mrz_full: "P<DEUKISLINGER<<STEFAN<<<<<<<<<<<<<<<<<<<<<<<\n1234567890DEU9001011M2501017<<<<<<<<<<<<<<6"  # preserve newlines!
+      passport_number: "123456789"
+      nationality_alpha3: "DEU" 
+      gender: "M"
+      birthday: "1990-01-01"  # YYYY-MM-DD format
+      ocr_confidence: 0.95  # optional
+
+# Fallback payload (when MRZ unavailable)
+request_fallback:
+  stay_id: "B7_Kislinger"
+  passports:
+    - first_name: "Stefan"     # required if no MRZ
+      last_name: "Kislinger"   # required if no MRZ  
+      passport_number: "123456789"
+      nationality_alpha3: "DEU"
+      gender: "M"
+      birthday: "1990-01-01"
+
+# Response format
+response:
+  success: true
+  stay_id: "B7_Kislinger"
+  summary:
+    total: 1
+    merged: 0
+    inserted: 1
+    errors: 0
+  results:
+    - index: 0
+      status: "success"
+      action: "inserted"
+      first_name: "Stefan"  # extracted from MRZ
+      passport_number: "123456789"
+  sheets_format:
+    description: "Tab-delimited format ready for Google Sheets"
+    columns: ["First Name", "Middle Name", "Last Name", "Gender", "Passport Number", "Nationality", "Birthday"]
+    data: "First Name\tMiddle Name\tLast Name\tGender *\tPassport No. *\tNationality *\tBirth Date (DD/MM/YYYY)\tCheck-out Date (DD/MM/YYYY)\tPhone No.\nStefan\t\tKislinger\tM\t123456789\tDEU\t01/01/1990\t\t"
+    rows_count: 1
+
+# Key improvements for CocoGPT:
+# ✅ MRZ parsing extracts names automatically (more reliable)
+# ✅ photo_urls optional - local file paths safely filtered out  
+# ✅ Google Sheets data generated automatically in response
+# ✅ Better error handling and validation
+# ✅ Preserve MRZ newlines for proper parsing

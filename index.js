@@ -290,7 +290,6 @@ function parseMRZ(mrzString) {
         // Also create the cleaned version for backward compatibility
         const nameSection = rawNameSection.replace(/</g, ' ').trim();
         const nameParts = nameSection.split(/\s+/).filter(Boolean);
-        
         // Extract passport number, gender and birthdate from second line if available (TD3 format)
         let passportNumber = null;
         let gender = null;
@@ -298,21 +297,42 @@ function parseMRZ(mrzString) {
         let expiryDate = null;
         if (lines.length >= 2) {
           const line2 = lines[1];
-          if (line2 && line2.length > 20) {
-            // Positions 0-8 contain passport number (remove trailing <)
-            if (line2.length >= 9) {
-              passportNumber = line2.substring(0, 9).replace(/</g, '').trim();
+          if (line2 && line2.length >= 28) {
+            // TD3 format has variable passport number length (up to 9 chars)
+            // Find where passport number ends (first < or position 9)
+            let passportEndPos = 9;
+            for (let i = 0; i < 9; i++) {
+              if (line2.charAt(i) === '<') {
+                passportEndPos = i;
+                break;
+              }
             }
+            passportNumber = line2.substring(0, passportEndPos).trim();
             
-            // Position 20 contains gender (M/F/X)
-            const genderChar = line2.charAt(20);
-            if (genderChar === 'M' || genderChar === 'F' || genderChar === 'X') {
-              gender = genderChar;
-            }
+            // After passport number (9 chars allocated), there's 1 check digit
+            // Then nationality code (3 chars) at positions 10-12
+            // But we need to account for actual passport length
+            const dataStartPos = 10; // Start of nationality
             
-            // Positions 13-18 contain birthdate in YYMMDD format
-            if (line2.length >= 19) {
-              const birthdateStr = line2.substring(13, 19); // YYMMDD
+            // For standard TD3, positions are:
+            // 0-8: Passport number (9 chars allocated)
+            // 9: Check digit
+            // 10-12: Nationality (3 chars)
+            // 13-18: Birth date (6 chars)
+            // 19: Check digit
+            // 20: Gender (1 char)
+            // 21-26: Expiry date (6 chars)
+            // 27: Check digit
+            
+            // However, if line is shorter than standard, adjust positions
+            const lineLength = line2.length;
+            const isShortLine = lineLength < 44;
+            const offset = isShortLine ? 44 - lineLength : 0;
+            
+            // Extract birthdate (adjusted for short lines)
+            const birthdatePos = 13 - offset;
+            if (lineLength >= birthdatePos + 6) {
+              const birthdateStr = line2.substring(birthdatePos, birthdatePos + 6);
               if (/^\d{6}$/.test(birthdateStr)) {
                 const year = parseInt(birthdateStr.substring(0, 2));
                 const month = parseInt(birthdateStr.substring(2, 4));
@@ -329,9 +349,19 @@ function parseMRZ(mrzString) {
               }
             }
             
-            // Positions 21-26 contain expiry date in YYMMDD format
-            if (line2.length >= 27) {
-              const expiryStr = line2.substring(21, 27); // YYMMDD
+            // Extract gender (adjusted for short lines)
+            const genderPos = 20 - offset;
+            if (lineLength > genderPos) {
+              const genderChar = line2.charAt(genderPos);
+              if (genderChar === 'M' || genderChar === 'F' || genderChar === 'X') {
+                gender = genderChar;
+              }
+            }
+            
+            // Extract expiry date (adjusted for short lines)
+            const expiryPos = 21 - offset;
+            if (lineLength >= expiryPos + 6) {
+              const expiryStr = line2.substring(expiryPos, expiryPos + 6);
               if (/^\d{6}$/.test(expiryStr)) {
                 const year = parseInt(expiryStr.substring(0, 2));
                 const month = parseInt(expiryStr.substring(2, 4));
@@ -347,6 +377,7 @@ function parseMRZ(mrzString) {
                 }
               }
             }
+          }
           }
         }
         

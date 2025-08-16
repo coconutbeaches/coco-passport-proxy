@@ -1,0 +1,306 @@
+openapi: 3.1.0
+info:
+  title: CocoGPT Passport Proxy API
+  description: Production API for passport data extraction and storage (MRZ or human-readable)
+  version: 3.1.0
+  contact:
+    name: Tyler @ Coconut Beach
+servers:
+  - url: https://coco-passport-proxy.vercel.app
+    description: Production server
+paths:
+  /coco-gpt-batch-passport:
+    post:
+      operationId: processBatchPassports
+      summary: Submit passport data for processing (MRZ or human-readable)
+      description: >
+        Submit passport data from images. Accepts MRZ (preferred), human-readable fields (fallback), or both.
+        MRZ extracts all data automatically. When fields are unclear, ask user for clarification before submitting.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - stay_id
+                - passports
+              properties:
+                stay_id:
+                  type: string
+                  description: Stay identifier provided by user (e.g., "B7 Kislinger" or "Beach House Smith"). Will be auto-normalized - use /resolve endpoint to test normalization.
+                  example: B7 Kislinger
+                passports:
+                  type: array
+                  minItems: 1
+                  items:
+                    oneOf:
+                      - type: object
+                        description: MRZ-based passport data (preferred)
+                        required:
+                          - mrz_full
+                        properties:
+                          mrz_full:
+                            type: string
+                            description: |
+                              Two-line MRZ data joined by single \n character. Must be UPPERCASE.
+                              API extracts all data from this automatically.
+                            example: "P<DEUKISLINGER<<STEFAN<<<<<<<<<<<<<<<<<<<<<<\nP123456789DEU8503151M2503156<<<<<<<<<<<<<<<2"
+                          ocr_confidence:
+                            type: number
+                            minimum: 0
+                            maximum: 1
+                            description: OCR confidence score (optional)
+                      - type: object
+                        description: Human-readable passport data (fallback when MRZ unavailable)
+                        required:
+                          - first_name
+                          - last_name
+                          - passport_number
+                          - nationality_alpha3
+                        properties:
+                          first_name:
+                            type: string
+                            description: Given name(s) from passport
+                            example: Stefan
+                          last_name:
+                            type: string
+                            description: Surname from passport
+                            example: Kislinger
+                          passport_number:
+                            type: string
+                            description: Passport number (UPPERCASE letters, numbers)
+                            example: P123456789
+                          nationality_alpha3:
+                            type: string
+                            description: 3-letter country code (UPPERCASE - e.g., DEU, USA, GBR)
+                            pattern: ^[A-Z]{3}$
+                            example: DEU
+                          birthday:
+                            type: string
+                            format: date
+                            description: Date of birth (YYYY-MM-DD format)
+                            example: "1985-03-15"
+                          gender:
+                            type: string
+                            enum: [M, F, X]
+                            description: Gender marker (UPPERCASE)
+                            example: M
+                          ocr_confidence:
+                            type: number
+                            minimum: 0
+                            maximum: 1
+                            description: OCR confidence score (optional)
+            examples:
+              mrz_preferred:
+                summary: MRZ data available (BEST)
+                value:
+                  stay_id: B7 Kislinger
+                  passports:
+                    - mrz_full: "P<DEUKISLINGER<<STEFAN<<<<<<<<<<<<<<<<<<<<<<\nP123456789DEU8503151M2503156<<<<<<<<<<<<<<<2"
+                      ocr_confidence: 0.95
+              human_readable_fallback:
+                summary: Human-readable fields (when MRZ damaged/unclear)
+                value:
+                  stay_id: B7 Kislinger
+                  passports:
+                    - first_name: Stefan
+                      last_name: Kislinger
+                      passport_number: P123456789
+                      nationality_alpha3: DEU
+                      birthday: "1985-03-15"
+                      gender: M
+                      ocr_confidence: 0.85
+              hybrid_approach:
+                summary: Partial MRZ + human-readable fields
+                value:
+                  stay_id: B7 Kislinger
+                  passports:
+                    - mrz_full: "P<DEU[unclear]<<STEFAN<<<<<<<<<<<<<<<<<<<<<<\n[second line unclear]"
+                      first_name: Stefan
+                      last_name: Kislinger
+                      passport_number: P123456789
+                      nationality_alpha3: DEU
+                      birthday: "1985-03-15"
+                      ocr_confidence: 0.70
+              after_asking_user:
+                summary: Data completed after asking user for unclear fields
+                value:
+                  stay_id: B7 Kislinger
+                  passports:
+                    - first_name: Paul
+                      last_name: Smith
+                      passport_number: G567890123
+                      nationality_alpha3: USA
+                      birthday: "1985-03-15"
+                      gender: M
+              manual_entry:
+                summary: Manually entered MRZ (no OCR confidence)
+                value:
+                  stay_id: B7 Kislinger
+                  passports:
+                    - mrz_full: "P<DEUKISLINGER<<STEFAN<<<<<<<<<<<<<<<<<<<<<<\nP123456789DEU8503151M2503156<<<<<<<<<<<<<<<2"
+              multiple_passports_mixed:
+                summary: Family with multiple passports (mixed extraction methods)
+                value:
+                  stay_id: A4 A5 Smith Family
+                  passports:
+                    - mrz_full: "P<USASMITH<<JOHN<<<<<<<<<<<<<<<<<<<<<<<<<<\nP987654321USA8001011M2501012<<<<<<<<<<<<<<<4"
+                      ocr_confidence: 0.92
+                    - first_name: Jane
+                      last_name: Smith
+                      passport_number: P456789123
+                      nationality_alpha3: USA
+                      birthday: "1985-05-05"
+                      gender: F
+                      ocr_confidence: 0.88
+                    - first_name: Bobby
+                      last_name: Smith
+                      passport_number: P111222333
+                      nationality_alpha3: USA
+                      birthday: "2015-07-20"
+                      gender: M
+      responses:
+        "200":
+          description: Processing completed successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - success
+                  - stay_id
+                  - summary
+                  - results
+                properties:
+                  success:
+                    type: boolean
+                    description: True if request was processed
+                  stay_id:
+                    type: string
+                    description: Normalized stay_id used by the system
+                    example: B7_Kislinger
+                  summary:
+                    type: object
+                    properties:
+                      total:
+                        type: integer
+                        description: Total passports processed
+                        example: 2
+                      merged:
+                        type: integer
+                        description: Existing records updated
+                        example: 1
+                      inserted:
+                        type: integer
+                        description: New records created
+                        example: 1
+                      errors:
+                        type: integer
+                        description: Failed processes
+                        example: 0
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        index:
+                          type: integer
+                        status:
+                          type: string
+                          enum: [success, error]
+                        action:
+                          type: string
+                          enum: [merged, inserted]
+                        first_name:
+                          type: string
+                          description: Name extracted from MRZ or provided
+                        passport_number:
+                          type: string
+                        error:
+                          type: string
+                          description: Error message if status is error
+              example:
+                success: true
+                stay_id: B7_Kislinger
+                summary:
+                  total: 2
+                  merged: 1
+                  inserted: 1
+                  errors: 0
+                results:
+                  - index: 0
+                    status: success
+                    action: merged
+                    first_name: Stefan
+                    passport_number: P123456789
+                  - index: 1
+                    status: success
+                    action: inserted
+                    first_name: Maria
+                    passport_number: P987654321
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: passports array is required
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+  /resolve:
+    get:
+      operationId: resolveStayId
+      summary: Test stay_id normalization
+      description: Utility to see how a stay_id will be normalized
+      parameters:
+        - name: stay_id
+          in: query
+          required: true
+          schema:
+            type: string
+          example: B7 Kislinger
+      responses:
+        "200":
+          description: Normalized components
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  input:
+                    type: string
+                    description: Original input string
+                    example: "B7 Kislinger"
+                  stay_id:
+                    type: string
+                    description: Normalized stay_id with underscores
+                    example: "B7_Kislinger"
+                  rooms:
+                    type: array
+                    description: Extracted room codes
+                    items:
+                      type: string
+                    example: ["B7"]
+                  rooms_in:
+                    type: string
+                    description: Comma-separated room codes
+                    example: "B7"
+                  last_in:
+                    type: string
+                    description: Original last name parts
+                    example: "Kislinger"
+                  last_name_canonical:
+                    type: string
+                    description: Normalized last name (capitalized, no spaces)
+                    example: "Kislinger"

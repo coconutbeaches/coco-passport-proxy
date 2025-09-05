@@ -196,30 +196,19 @@ function logTSVOperation(operation, data) {
 async function insertGuestsFromTSV({ stay_id, default_checkout, guests_tsv }) {
   const startTime = Date.now();
   const rows = [];
-  const validationErrors = [];
-  const badRows = [];
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Bangkok' }); // YYYY-MM-DD
   const fallbackCheckout = toYMD(default_checkout);
 
-  // Parse lines with better handling of different newline styles
-  const lines = String(guests_tsv || '').split(/\r?\n/);
-  
+  const badRows = [];
+  const lines = String(guests_tsv || '').split(/\r?\n/).filter(l => l.trim());
   for (let i = 0; i < lines.length; i++) {
     const rawLine = lines[i];
-    if (!rawLine || !rawLine.trim()) continue;
-    
-    // Handle weird spacing around tabs and pad with empty strings if needed
-    const parts = rawLine.split('\t').map(p => p.trim());
-    
-    // Pad with empty strings if less than 8 parts, but still need at least some data
-    if (parts.length < 3) {
-      badRows.push(i);
-      continue; // skip malformed - need at least first, last name, and one more field
-    }
-    
-    // Pad to ensure we have 8 parts
-    while (parts.length < 8) {
-      parts.push('');
+    const parts = rawLine.split('\t');
+
+    // STRICT: must be exactly 8 columns
+    if (parts.length !== 8) {
+      badRows.push(i); // zero-based index
+      continue;
     }
 
     let [
@@ -233,32 +222,34 @@ async function insertGuestsFromTSV({ stay_id, default_checkout, guests_tsv }) {
       checkout_date
     ] = parts;
 
-    const nationality_alpha3 = (nationality || '').trim().toUpperCase().slice(0, 3) || null;
+    const nationality_alpha3 = (nationality || '').trim().toUpperCase().slice(0, 3);
+    const natValid = /^[A-Z]{3}$/.test(nationality_alpha3);
 
-    const guest = {
+    const g = normGender(gender);
+    const bday = toYMD(birthday);
+    const outCheckout = toYMD(checkout_date) || fallbackCheckout;
+
+    // STRICT: validate required pieces; mark row bad if they fail
+    if (!first_name?.trim() || !last_name?.trim() || !passport_number?.trim()
+        || !natValid || !g || !outCheckout) {
+      badRows.push(i);
+      continue;
+    }
+
+    rows.push({
       stay_id: nullIfEmpty(stay_id),
       first_name: nullIfEmpty(first_name),
       middle_name: nullIfEmpty(middle_name),
       last_name: nullIfEmpty(last_name),
-      gender: normGender(gender),
+      gender: g,
       passport_number: nullIfEmpty(passport_number),
       nationality_alpha3,
       issuing_country_alpha3: nationality_alpha3,
-      birthday: toYMD(birthday),
+      birthday: bday,
       check_in_date: today,
-      check_out_date: toYMD(checkout_date) || fallbackCheckout,
+      check_out_date: outCheckout,
       photo_urls: []
-    };
-    
-    // Strict validation
-    const rowErrors = validateGuestRow(guest, i);
-    if (rowErrors.length > 0) {
-      validationErrors.push(...rowErrors);
-      badRows.push(i);
-      continue;
-    }
-    
-    rows.push(guest);
+    });
   }
 
   // Count countries for observability
@@ -274,14 +265,10 @@ async function insertGuestsFromTSV({ stay_id, default_checkout, guests_tsv }) {
       stay_id,
       total_lines: lines.length,
       bad_rows: badRows,
-      validation_errors: validationErrors.length,
       latency_ms: Date.now() - startTime
     });
     
-    if (validationErrors.length > 0) {
-      throw new Error(`Validation failed: ${validationErrors.join(', ')}`);
-    }
-    return 0;
+    return { insertedCount: 0, badRows };
   }
 
   const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } = process.env || {};
@@ -309,6 +296,7 @@ async function insertGuestsFromTSV({ stay_id, default_checkout, guests_tsv }) {
       stay_id,
       total_rows: rows.length,
       supabase_status: resp.status,
+      bad_rows: badRows.length > 0 ? badRows : undefined,
       latency_ms: Date.now() - startTime
     });
     throw new Error(`Supabase insert failed: ${resp.status} ${txt}`);
@@ -326,7 +314,7 @@ async function insertGuestsFromTSV({ stay_id, default_checkout, guests_tsv }) {
     latency_ms: Date.now() - startTime
   });
   
-  return insertedCount;
+  return { insertedCount, badRows };
 }
 // ================== /helpers ==================
 
@@ -2081,15 +2069,26 @@ const handler = async (req, res) => {
         }));
       }
 
-      const inserted = await insertGuestsFromTSV({ stay_id, default_checkout, guests_tsv });
+      const result = await insertGuestsFromTSV({ stay_id, default_checkout, guests_tsv });
+      const { insertedCount, badRows } = result;
 
-      if (inserted === 0) {
+      if (insertedCount === 0) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ ok: false, error: 'no valid TSV rows after parsing' }));
+        return res.end(JSON.stringify({ 
+          ok: false, 
+          error: 'no valid TSV rows after parsing',
+          bad_rows: badRows
+        }));
+      }
+
+      const response = { ok: true, inserted: insertedCount };
+      if (badRows && badRows.length > 0) {
+        response.bad_rows = badRows;
+        response.message = `${insertedCount} rows inserted, ${badRows.length} rows rejected`;
       }
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ ok: true, inserted }));
+      return res.end(JSON.stringify(response));
     } catch (err) {
       // Log structured error for monitoring
       logTSVOperation('tsv_error', {

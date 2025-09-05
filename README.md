@@ -4,12 +4,14 @@ A Node.js API service for processing passport data and Tokeet booking feeds for 
 
 ## Features
 
-- **Passport Processing**: OCR passport data extraction and storage
+- **Passport Processing**: OCR passport data extraction and storage with dedicated microservice
 - **Tokeet Integration**: Automated CSV/JSON feed processing from Tokeet booking system
 - **Multi-format Support**: Handles both CSV and JSON data formats
 - **Database Integration**: Supabase integration with automatic upsert capabilities
 - **File Storage**: Image upload to Supabase Storage
 - **Stay ID Resolution**: Intelligent room and guest name parsing
+- **PaddleOCR Service**: Cloud Run-based OCR processing of passport images
+- **Proxy API**: Vercel serverless proxy for OCR service integration
 
 ## Environment Requirements
 
@@ -298,6 +300,38 @@ Common error scenarios:
 - Input validation and sanitization
 - Safe URL parameter handling
 - Environment-based configuration
+
+## Components
+
+### Main API Service
+
+Vercel-hosted Node.js service handling booking feeds and guest data:
+
+- `/tokeet-upsert`: Process Tokeet booking data
+- `/insert`: Bulk insert guest records
+- `/passport`: Merge passport data
+- Other utility endpoints (export, status, etc.)
+
+### OCR Microservice
+
+Cloud Run-based FastAPI service for passport image processing:
+
+- PaddleOCR-based text detection
+- Image preprocessing and enhancement
+- MRZ (Machine Readable Zone) parsing
+- TSV output format for database compatibility
+
+See [apps/ocr/README.md](apps/ocr/README.md) for details.
+
+### OCR Proxy API
+
+Vercel serverless proxy for OCR service integration:
+
+- `/api/passport-ocr`: Forward passport image processing
+- Multipart form data handling
+- Authentication and error propagation
+
+See [apps/proxy/README.md](apps/proxy/README.md) for details.
 
 ## License
 

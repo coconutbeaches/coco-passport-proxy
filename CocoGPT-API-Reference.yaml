@@ -16,7 +16,15 @@ paths:
       operationId: processBatchPassports
       summary: Process batch of passports with MRZ data
       description: |
-        Primary endpoint for CocoGPT passport processing. Processes multiple passports, extracts names from MRZ automatically, smart merge/insert updates existing guests, generates Google Sheets TM30 format. MRZ Format Critical: Two lines joined by \n
+        Submit passport MRZ data for processing. 
+        
+        INTEGRATION RULES:
+        1. MRZ strongly recommended - include mrz_full with literal \n between lines when possible
+        2. NEVER mock success - always call real API and return actual response
+        3. If API returns error, ask user for missing fields - don't fail silently
+        4. Names optional with MRZ - API extracts from MRZ automatically
+        5. Individual passport failures don't stop the batch
+        6. Direct API: https://coco-passport-proxy.vercel.app
         
       requestBody:
         required: true
@@ -41,8 +49,10 @@ paths:
                       mrz_full:
                         type: string
                         description: |
-                          **REQUIRED:** Two-line MRZ data joined by single \n
-                          Names extracted automatically from this field
+                          **STRONGLY RECOMMENDED:** Two-line MRZ data joined by a single "\n" character.
+                          This should contain a literal newline character between the two MRZ lines.
+                          Names, gender, birthdate extracted automatically from this field.
+                          Example format: "P<DEUKISLINGER<<STEFAN<<<<<<<<<<<<<<<<<<<<<<\nP123456789DEU8503151M2503156<<<<<<<<<<<<<<<2"
                         example: "P<DEUKISLINGER<<STEFAN<<<<<<<<<<<<<<<<<<<<<<\nP123456789DEU8503151M2503156<<<<<<<<<<<<<<<2"
                       first_name:
                         type: string
@@ -73,13 +83,6 @@ paths:
                         type: string
                         format: date
                         example: "1985-03-15"
-                      photo_urls:
-                        type: array
-                        description: "Optional: Public HTTP/HTTPS URLs only (local paths filtered out)"
-                        items:
-                          type: string
-                          format: uri
-                        example: ["https://example.com/passport1.jpg"]
             examples:
               mrz_only:
                 summary: "MRZ-only (recommended)"
@@ -172,7 +175,7 @@ paths:
                           description: "Present if status=error"
                   sheets_format:
                     type: object
-                    description: "Ready-to-use Google Sheets TM30 format"
+                    description: "DEPRECATED - Use Supabase daily TM30 export instead"
                     properties:
                       description:
                         type: string
@@ -222,6 +225,29 @@ paths:
                   expected_format:
                     type: object
                     description: "Example of correct request format"
+              examples:
+                missing_mrz:
+                  summary: "Missing required MRZ"
+                  value:
+                    error: "mrz_full is required for each passport"
+                    expected_format:
+                      stay_id: "B7_Kislinger"
+                      passports:
+                        - mrz_full: "P<DEUKISLINGER<<STEFAN<<<<<<<<<<<<<<<<<<<<<<\nP123456789DEU8503151M2503156<<<<<<<<<<<<<<<2"
+                          ocr_confidence: 0.95
+                invalid_mrz_format:
+                  summary: "Invalid MRZ format (missing newline)"
+                  value:
+                    error: "Invalid MRZ: must contain two lines separated by \\n"
+                    expected_format:
+                      mrz_full: "LINE1\nLINE2"
+                missing_passports:
+                  summary: "Missing passports array"
+                  value:
+                    error: "passports array is required"
+                    expected_format:
+                      stay_id: "B7_Kislinger"
+                      passports: []
                     
         500:
           description: Server error (database issues, etc.)
@@ -321,7 +347,11 @@ components:
       properties:
         mrz_full:
           type: string
-          description: "Two-line MRZ joined by \\n - CRITICAL FOR NAME EXTRACTION"
+          description: |
+            **REQUIRED:** Two-line MRZ joined by literal "\n" character.
+            Format: "P<COUNTRYCODE<LASTNAME<<FIRSTNAME<<<...\nSECOND_LINE_WITH_PASSPORT_DATA"
+            The API extracts names, gender, birthdate from this automatically.
+          example: "P<DEUKISLINGER<<STEFAN<<<<<<<<<<<<<<<<<<<<<<\nP123456789DEU8503151M2503156<<<<<<<<<<<<<<<2"
         first_name:
           type: string
           description: "Optional if MRZ provided"
@@ -340,18 +370,12 @@ components:
         birthday:
           type: string
           format: date
-        photo_urls:
-          type: array
-          items:
-            type: string
-            format: uri
-          description: "Public URLs only - local paths filtered out"
 
-# Integration Notes for CocoGPT:
+# CRITICAL NOTES FOR COCOGPT INTEGRATION:
 # 
-# 1. **Single API Call:** Use /coco-gpt-batch-passport for all passport processing
-# 2. **MRZ Critical:** Always include mrz_full with proper \n newlines 
-# 3. **Names Optional:** API extracts from MRZ automatically
-# 4. **Ready Output:** Copy sheets_format.data directly to Google Sheets
-# 5. **Error Handling:** Individual passport failures don't stop batch processing
-# 6. **Production Ready:** Full database integration, smart merging, TM30 format
+# 1. **MRZ STRONGLY RECOMMENDED:** Include mrz_full field with literal \n between lines when possible
+# 2. **NEVER MOCK SUCCESS:** Always call the real API and return actual response
+# 3. **ERROR HANDLING:** If API returns error, ask user for missing fields - don't fail silently
+# 4. **Names Optional with MRZ:** API extracts from MRZ automatically - send names if MRZ unavailable
+# 5. **Batch Processing:** Individual passport failures don't stop the batch
+# 6. **Direct API Calls:** Call https://coco-passport-proxy.vercel.app directly - no proxy tools

@@ -1,0 +1,173 @@
+openapi: 3.1.0
+info:
+  title: Coco Batch Passport API
+  version: 1.0.0
+  description: API for processing passport MRZ data from CocoGPT
+servers:
+  - url: https://coco-passport-proxy.vercel.app
+paths:
+  /coco-gpt-batch-passport:
+    post:
+      operationId: postCocoGptBatchPassport
+      summary: Process batch passport MRZ data
+      description: Accepts MRZ line pairs and processes them into the guest database
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MRZBatchRequest"
+            examples:
+              example1:
+                summary: Two passports MRZ data
+                value:
+                  mrz_list:
+                    - ["P<GBRALING<<BARRY<ALAN<<<<<<<<<<<<<<<<<<<<<", "1519149567GBR5006018M3410093<<<<<<<<<<<<<<04"]
+                    - ["P<GBRSMITH<<JOHN<ROBERT<<<<<<<<<<<<<<<<<<<<", "9876543210USA8001015M2501015<<<<<<<<<<<<<<02"]
+      responses:
+        "200":
+          description: Successful processing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BatchResponse"
+              examples:
+                success:
+                  value:
+                    success: true
+                    stay_id: null
+                    summary:
+                      total: 2
+                      merged: 1
+                      inserted: 1
+                      errors: 0
+                    results:
+                      - index: 0
+                        status: "success"
+                        action: "inserted"
+                        first_name: "BARRY ALAN"
+                        passport_number: "151914956"
+                      - index: 1
+                        status: "success"
+                        action: "merged"
+                        first_name: "JOHN ROBERT"
+                        passport_number: "987654321"
+        "400":
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                missing_data:
+                  value:
+                    error: "passports array or mrz_list is required"
+        "500":
+          description: Server Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+components:
+  schemas:
+    MRZBatchRequest:
+      type: object
+      required:
+        - mrz_list
+      properties:
+        mrz_list:
+          type: array
+          description: Array of MRZ line pairs (each passport has 2 lines)
+          minItems: 1
+          items:
+            type: array
+            description: Two-line MRZ data for a single passport
+            minItems: 2
+            maxItems: 2
+            items:
+              type: string
+              description: Single MRZ line (44 characters for passports)
+              pattern: "^[A-Z0-9<]{30,44}$"
+        stay_id:
+          type: string
+          description: Optional stay identifier (e.g., "A3_Aling")
+          nullable: true
+    BatchResponse:
+      type: object
+      required:
+        - success
+        - summary
+        - results
+      properties:
+        success:
+          type: boolean
+          description: Whether the batch processing was successful
+        stay_id:
+          type: string
+          nullable: true
+          description: The normalized stay ID if provided
+        summary:
+          type: object
+          required:
+            - total
+            - merged
+            - inserted
+            - errors
+          properties:
+            total:
+              type: integer
+              description: Total number of passports processed
+            merged:
+              type: integer
+              description: Number of records merged with existing entries
+            inserted:
+              type: integer
+              description: Number of new records inserted
+            errors:
+              type: integer
+              description: Number of errors encountered
+        results:
+          type: array
+          description: Individual results for each passport
+          items:
+            $ref: "#/components/schemas/PassportResult"
+    PassportResult:
+      type: object
+      required:
+        - index
+        - status
+      properties:
+        index:
+          type: integer
+          description: Zero-based index of the passport in the input array
+        status:
+          type: string
+          enum: ["success", "error"]
+          description: Processing status for this passport
+        action:
+          type: string
+          enum: ["merged", "inserted"]
+          description: Action taken (only present if status is success)
+        first_name:
+          type: string
+          description: First name extracted from the passport
+        passport_number:
+          type: string
+          description: Passport number extracted
+        error:
+          type: string
+          description: Error message (only present if status is error)
+        passport:
+          type: object
+          description: Original passport data (only present if status is error)
+    ErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          description: Error message describing what went wrong
+        expected_formats:
+          type: object
+          description: Examples of expected request formats (returned on 400 errors)

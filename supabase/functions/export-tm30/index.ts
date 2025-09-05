@@ -3,6 +3,30 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import * as XLSX from 'https://cdn.sheetjs.com/xlsx-0.20.1/package/xlsx.mjs'
 
+// Function to remove diacritics (accents) from text
+function removeDiacritics(str: string): string {
+  if (!str) return ''
+  
+  // Normalize to NFD (decomposed form) then remove combining diacritical marks
+  return str.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+}
+
+// Function to sanitize names for TM30 format
+function sanitizeName(name: string): string {
+  if (!name) return ''
+  
+  // Remove diacritics first
+  let sanitized = removeDiacritics(name)
+  
+  // Replace hyphens and dashes with spaces
+  sanitized = sanitized.replace(/[-–—]/g, ' ')
+  
+  // Clean up multiple spaces
+  sanitized = sanitized.replace(/\s+/g, ' ').trim()
+  
+  return sanitized
+}
+
 serve(async (req) => {
   try {
     // Initialize Supabase client
@@ -67,9 +91,9 @@ serve(async (req) => {
       }
 
       return [
-        guest.first_name || '',
-        guest.middle_name || '',
-        guest.last_name || '',
+        sanitizeName(guest.first_name) || '',
+        sanitizeName(guest.middle_name) || '',
+        sanitizeName(guest.last_name) || '',
         guest.gender || '',
         guest.passport_number || '',
         guest.nationality_alpha3 || '',

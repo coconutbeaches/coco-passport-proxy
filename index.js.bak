@@ -1,8 +1,6 @@
 const crypto = require('crypto');
 const { parse } = require('csv-parse/sync');
 const { CSV_TO_DB_MAPPING, DEFAULT_RECORD_VALUES } = require('./lib/tokeetFieldMap');
-const { ImageAnnotatorClient } = require('@google-cloud/vision');
-const busboy = require('busboy');
 
 // Base URL configuration with runtime safety check
 const PUBLIC_PASSPORT_PROXY_URL = 'https://coco-passport-proxy.vercel.app';
@@ -107,68 +105,6 @@ function resolveTemplateDates(urlStr){
       .replace(/{start:%([^}]+)}/g, (_,fmt)=>fmtDate(tmr, '%'+fmt))
       .replace(/{end:%([^}]+)}/g,   (_,fmt)=>fmtDate(tmr, '%'+fmt));
   }catch{ return urlStr }
-}
-
-// --- Passport OCR helper functions -------------------------------------------
-function titleCase(s){ return s ? s.toLowerCase().replace(/\b\w/g, c => c.toUpperCase()) : s; }
-
-function formatDDMMYYYY(s){
-  const m = String(s || '').trim().match(/^(\d{2})[\/.\- ](\d{2})[\/.\- ](\d{4})$/);
-  return m ? `${m[1].padStart(2,'0')}/${m[2].padStart(2,'0')}/${m[3]}` : '';
-}
-
-function parseVIZ(text){
-  const up = (text || '').toUpperCase();
-  const pull = (...rxs) => { for (const rx of rxs){ const m = up.match(rx); if (m) return m[1].trim(); } return null; };
-
-  const last = pull(/SURNAME[:\s]*([A-Z \-']+)/, /NAAM[:\s]*([A-Z \-']+)/, /APELLIDOS?[:\s]*([A-Z \-']+)/);
-  const given = pull(/GIVEN NAMES?[:\s]*([A-Z \-']+)/, /VOORNAMEN[:\s]*([A-Z \-']+)/, /NOMBRES?[:\s]*([A-Z \-']+)/);
-  const number = pull(/(?:DOCUMENT|PASSPORT)\s?NO\.?[:\s]*([A-Z0-9]+)/, /DOCUMENTNR[:\s]*([A-Z0-9]+)/);
-  const nat = pull(/NATIONALITY[:\s]*([A-Z \-]+)/, /NATIONALITE[TÉ]?\s*[:\s]*([A-Z \-]+)/, /NATIONALITEIT[:\s]*([A-Z \-]+)/);
-  const dob = pull(/DATE OF BIRTH[:\s]*([0-9./\- ]+)/, /GEBOORTEDATUM[:\s]*([0-9./\- ]+)/, /FECHA DE NAC[:\s]*([0-9./\- ]+)/);
-  const sex = pull(/SEX[:\s]*([MFX])/, /GESLACHT[:\s]*([MVX])/, /SEXE[:\s]*([MFX])/);
-
-  const natAlpha3 = t => {
-    if (!t) return '';
-    const T = t.replace(/[^A-Z ]/g,'').trim();
-    if (/\bNLD\b|NETHERLANDS|NEDERLAND|PAYS BAS|PAYS-BAS/.test(T)) return 'NLD';
-    const m = T.match(/\b[A-Z]{3}\b/);
-    return m ? m[0] : '';
-  };
-
-  const parts = (given || '').split(/[ ,]+/).filter(Boolean);
-  const first = titleCase(parts[0] || '');
-  const middle = parts.length > 1 ? titleCase(parts.slice(1).join(' ')) : '';
-
-  return {
-    first_name: first,
-    middle_name: middle,
-    last_name: titleCase(last || ''),
-    gender: sex ? sex[0].toUpperCase() : '',
-    passport_number: number ? number.replace(/\s+/g,'') : '',
-    nationality_alpha3: natAlpha3(nat),
-    birthday: formatDDMMYYYY(dob || '') || ''
-  };
-}
-
-function parseMultipart(req){
-  return new Promise((resolve, reject) => {
-    const bb = busboy({ headers: req.headers });
-    const files = [];
-    let default_checkout = null;
-
-    bb.on('file', (_, file) => {
-      const chunks = [];
-      file.on('data', d => chunks.push(d));
-      file.on('end', () => files.push(Buffer.concat(chunks)));
-    });
-    bb.on('field', (name, val) => {
-      if (name === 'default_checkout') default_checkout = val;
-    });
-    bb.on('finish', () => resolve({ files, default_checkout }));
-    bb.on('error', reject);
-    req.pipe(bb);
-  });
 }
 
 // CSV to DB field mapping now imported from centralized lib/tokeetFieldMap.js
@@ -1742,69 +1678,6 @@ const handler = async (req, res) => {
     }catch(e){ res.statusCode=500; res.end(JSON.stringify({ ok:false, error:e.message||'tokeet-upsert-rows error' })); return; }
   }
 
-  // --- /ocr (URL-based Google Vision OCR) -------------------------------------
-  if (req.method === 'POST' && url.pathname === '/ocr') {
-    try {
-      const body = await parseBody(req).catch(() => ({}));
-      if (!body || !body.imageUrl) {
-        res.statusCode = 400;
-        res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ ok: false, error: 'imageUrl is required' }));
-        return;
-      }
-
-      const client = new ImageAnnotatorClient();
-      const [result] = await client.textDetection(body.imageUrl);
-      const detections = result?.textAnnotations || [];
-      const fullText = detections.length > 0 ? detections[0].description : '';
-
-      res.setHeader('Content-Type', 'application/json');
-      res.end(JSON.stringify({ ok: true, text: fullText, raw: detections }));
-    } catch (err) {
-      console.error('OCR error:', err);
-      res.statusCode = 500;
-      res.setHeader('Content-Type', 'application/json');
-      res.end(JSON.stringify({ ok: false, error: String(err?.message || err) }));
-    }
-    return;
-  }
-
-  // --- /passport-ocr (multipart images -> TSV via Google Vision) ---------------
-  if (req.method === 'POST' && url.pathname === '/passport-ocr') {
-    try {
-      const { files, default_checkout } = await parseMultipart(req);
-      if (!files || !files.length) {
-        res.statusCode = 400;
-        res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ error: 'no_images' }));
-        return;
-      }
-
-      const client = new ImageAnnotatorClient(); // uses GOOGLE_APPLICATION_CREDENTIALS
-      const guests = [];
-      for (const buf of files) {
-        const [result] = await client.documentTextDetection({ image: { content: buf } });
-        const text = result?.fullTextAnnotation?.text || (result?.textAnnotations || []).map(a => a.description).join('\n') || '';
-        const fields = parseVIZ(text);
-        guests.push({ ...fields, checkout: '' });
-      }
-
-      // TSV: First | Middle | Last | Gender | Passport | Nationality | Birthday | Checkout
-      const guests_tsv = guests.map(g =>
-        [g.first_name, g.middle_name, g.last_name, g.gender, g.passport_number, g.nationality_alpha3, g.birthday, ''].join('\t')
-      ).join('\n');
-
-      res.setHeader('Content-Type', 'application/json');
-      res.end(JSON.stringify({ guests_tsv, guests, default_checkout: default_checkout || '' }));
-    } catch (e) {
-      console.error('passport-ocr error:', e);
-      res.statusCode = 500;
-      res.setHeader('Content-Type', 'application/json');
-      res.end(JSON.stringify({ error: 'ocr_failed', detail: String(e?.message || e) }));
-    }
-    return;
-  }
-
   // Fallback
   res.statusCode = 404;
   res.setHeader('Content-Type','application/json');
@@ -1935,3 +1808,174 @@ async function handlePassportUpsertOrMerge(passportData) {
 
   return upsertResp;
 }
+
+// --- /ocr (Google Vision OCR on uploaded passport photo) ---------------------
+if (req.method === 'POST' && url.pathname === '/ocr') {
+  const handleOCR = async () => {
+      try {
+        const vision = require('@google-cloud/vision');
+        const client = new vision.ImageAnnotatorClient();
+
+        const body = await parseBody(req).catch(() => ({}));
+        if (!body.imageUrl) {
+          res.statusCode = 400;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ ok: false, error: 'imageUrl is required' }));
+          return;
+        }
+
+        // Run OCR with Google Vision
+        const [result] = await client.textDetection(body.imageUrl);
+        const detections = result.textAnnotations || [];
+        const fullText = detections.length > 0 ? detections[0].description : '';
+
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({
+          ok: true,
+          text: fullText,
+          raw: detections
+        }));
+      } catch (err) {
+        console.error('OCR error:', err);
+        res.statusCode = 500;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ ok: false, error: err.message }));
+      }
+    };
+    return handleOCR();
+  }
+}
+// --- /passport-ocr (Google Vision OCR; multipart images -> TSV) -------------
+const { ImageAnnotatorClient } = require('@google-cloud/vision');
+const Busboy = require('busboy');
+
+function ddmmyyyy(s) {
+  const m = String(s || '').trim().match(/^(\d{2})[\/.\- ](\d{2})[\/.\- ](\d{4})$/);
+  if (!m) return '';
+  return `${m[1].padStart(2,'0')}/${m[2].padStart(2,'0')}/${m[3]}`;
+}
+function title(s){ return s ? s.toLowerCase().replace(/\b\w/g, c => c.toUpperCase()) : s; }
+
+function parseVIZ(text) {
+  const up = (text || '').toUpperCase();
+  const pull = (...rxs) => { for (const rx of rxs){ const m = up.match(rx); if (m) return m[1].trim(); } return null; };
+
+  const last = pull(/SURNAME[:\s]*([A-Z \-']+)/, /NAAM[:\s]*([A-Z \-']+)/, /APELLIDOS?[:\s]*([A-Z \-']+)/);
+  const given = pull(/GIVEN NAMES?[:\s]*([A-Z \-']+)/, /VOORNAMEN[:\s]*([A-Z \-']+)/, /NOMBRES?[:\s]*([A-Z \-']+)/);
+  const number = pull(/(?:DOCUMENT|PASSPORT)\s?NO\.?[:\s]*([A-Z0-9]+)/, /DOCUMENTNR[:\s]*([A-Z0-9]+)/);
+  const nat = pull(/NATIONALITY[:\s]*([A-Z \-]+)/, /NATIONALITE[TÉ]?\s*[:\s]*([A-Z \-]+)/, /NATIONALITEIT[:\s]*([A-Z \-]+)/);
+  const dob = pull(/DATE OF BIRTH[:\s]*([0-9./\- ]+)/, /GEBOORTEDATUM[:\s]*([0-9./\- ]+)/, /FECHA DE NAC[:\s]*([0-9./\- ]+)/);
+  const sex = pull(/SEX[:\s]*([MFX])/, /GESLACHT[:\s]*([MVX])/, /SEXE[:\s]*([MFX])/);
+
+  const natAlpha3 = t => {
+    if (!t) return '';
+    const T = t.replace(/[^A-Z ]/g,'').trim();
+    if (/\bNLD\b|NETHERLANDS|NEDERLAND|PAYS BAS|PAYS-BAS/.test(T)) return 'NLD';
+    const m = T.match(/\b[A-Z]{3}\b/);
+    return m ? m[0] : '';
+  };
+
+  const parts = (given || '').split(/[ ,]+/).filter(Boolean);
+  const first = title(parts[0] || '');
+  const middle = parts.length > 1 ? title(parts.slice(1).join(' ')) : '';
+
+  return {
+    first_name: first,
+    middle_name: middle,
+    last_name: title(last || ''),
+    gender: sex ? sex[0].toUpperCase() : '',
+    passport_number: number ? number.replace(/\s+/g,'') : '',
+    nationality_alpha3: natAlpha3(nat),
+    birthday: ddmmyyyy(dob || '') || ''
+  };
+}
+
+function parseMultipart(req){
+  return new Promise((resolve, reject) => {
+    const bb = Busboy({ headers: req.headers });
+    const files = [];
+    let default_checkout = null;
+
+    bb.on('file', (_, file) => {
+      const chunks = [];
+      file.on('data', d => chunks.push(d));
+      file.on('end', () => files.push(Buffer.concat(chunks)));
+    });
+
+    bb.on('field', (name, val) => {
+      if (name === 'default_checkout') default_checkout = val;
+    });
+
+    bb.on('finish', () => resolve({ files, default_checkout }));
+    bb.on('error', reject);
+    req.pipe(bb);
+  });
+}
+
+if (req.method === 'POST' && url.pathname === '/passport-ocr') {
+  try {
+    const { files } = await parseMultipart(req);
+    if (!files || !files.length) {
+      res.statusCode = 400;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ error: 'no_images' }));
+      return;
+    }
+
+    const client = new ImageAnnotatorClient(); // uses GOOGLE_APPLICATION_CREDENTIALS
+    const guests = [];
+    for (const buf of files) {
+      const [result] = await client.documentTextDetection({ image: { content: buf } });
+      const text = result?.fullTextAnnotation?.text || (result?.textAnnotations || []).map(a => a.description).join('\\n') || '';
+      const fields = parseVIZ(text);
+      guests.push({ ...fields, checkout: '' });
+    }
+
+    const guests_tsv = guests.map(g =>
+      [g.first_name, g.middle_name, g.last_name, g.gender, g.passport_number, g.nationality_alpha3, g.birthday, ''].join('\\t')
+    ).join('\\n');
+
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ guests_tsv, guests }));
+  } catch (e) {
+    console.error('passport-ocr error:', e);
+    res.statusCode = 500;
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ error: 'ocr_failed', detail: String(e?.message || e) }));
+  }
+  return;
+}
+
+  // --- /ocr (Google Vision OCR on remote image URL) --------------------------
+  if (req.method === 'POST' && url.pathname === '/ocr') {
+    try {
+      const vision = require('@google-cloud/vision');
+      const client = new vision.ImageAnnotatorClient();
+
+      const body = await parseBody(req).catch(() => ({}));
+      if (!body.imageUrl) {
+        res.statusCode = 400;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ ok: false, error: 'imageUrl is required' }));
+        return;
+      }
+
+      // Run OCR with Google Vision
+      const [result] = await client.textDetection(body.imageUrl);
+      const detections = result.textAnnotations || [];
+      const fullText = detections.length > 0 ? detections[0].description : '';
+
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({
+        ok: true,
+        text: fullText,
+        raw: detections
+      }));
+    } catch (err) {
+      console.error('OCR error:', err);
+      res.statusCode = 500;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ ok: false, error: err.message }));
+    }
+    return;
+  }

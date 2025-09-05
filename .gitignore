@@ -1,4 +1,30 @@
-.vercel
-index.js.bak*
-vercel.json.bak*
-.env*.local
+# dependencies
+node_modules/
+pnpm-lock.yaml
+yarn.lock
+
+# builds & caches
+dist/
+build/
+.out/
+.next/
+.vercel/
+coverage/
+.cache/
+.tmp/
+.eslintcache
+turbo/
+.svelte-kit/
+
+# env & system junk
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*

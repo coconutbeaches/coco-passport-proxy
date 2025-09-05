@@ -72,9 +72,24 @@ async function fetchJson(url, opts={}) {
  * @returns {boolean} True if OPTIONS request was handled, false otherwise
  */
 function sendCORS(req, res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  // Tighten CORS for production - allow specific Coco origins
+  const allowedOrigins = [
+    'https://coco-passport-proxy.vercel.app',
+    'https://coconutbeaches.com',
+    'https://app.coconutbeaches.com',
+    'http://localhost:3000', // For development
+    'http://localhost:8080'
+  ];
+  
+  const origin = req.headers.origin;
+  if (allowedOrigins.includes(origin) || !origin) {
+    res.setHeader('Access-Control-Allow-Origin', origin || '*');
+  }
+  
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, apikey, Accept-Profile, Content-Profile');
+  res.setHeader('Access-Control-Max-Age', '86400'); // Cache preflight for 24 hours
+  
   if (req.method === 'OPTIONS') { res.statusCode = 204; res.end(); return true; }
   return false;
 }
@@ -143,15 +158,69 @@ function toYMD(input, tz = 'Asia/Bangkok') {
   return null;
 }
 
+// Strict validation for production
+function validateGuestRow(guest, rowIndex) {
+  const errors = [];
+  
+  // Gender must be exactly M, F, or X (but allow null)
+  if (guest.gender && !['M', 'F', 'X'].includes(guest.gender)) {
+    errors.push(`Invalid gender '${guest.gender}' at row ${rowIndex}`);
+  }
+  
+  // Nationality must be exactly 3 A-Z characters (but allow null)
+  if (guest.nationality_alpha3 && !/^[A-Z]{3}$/.test(guest.nationality_alpha3)) {
+    errors.push(`Invalid nationality_alpha3 '${guest.nationality_alpha3}' at row ${rowIndex}`);
+  }
+  
+  // Dates must be YYYY-MM-DD format or null
+  if (guest.birthday && !/^\d{4}-\d{2}-\d{2}$/.test(guest.birthday)) {
+    errors.push(`Invalid birthday format '${guest.birthday}' at row ${rowIndex}`);
+  }
+  if (guest.check_out_date && !/^\d{4}-\d{2}-\d{2}$/.test(guest.check_out_date)) {
+    errors.push(`Invalid check_out_date format '${guest.check_out_date}' at row ${rowIndex}`);
+  }
+  
+  return errors;
+}
+
+// Structured logging helper
+function logTSVOperation(operation, data) {
+  const logEntry = {
+    timestamp: new Date().toISOString(),
+    op: operation,
+    ...data
+  };
+  console.log(JSON.stringify(logEntry));
+}
+
 async function insertGuestsFromTSV({ stay_id, default_checkout, guests_tsv }) {
+  const startTime = Date.now();
   const rows = [];
+  const validationErrors = [];
+  const badRows = [];
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Bangkok' }); // YYYY-MM-DD
   const fallbackCheckout = toYMD(default_checkout);
 
-  for (const rawLine of String(guests_tsv || '').split(/\r?\n/)) {
+  // Parse lines with better handling of different newline styles
+  const lines = String(guests_tsv || '').split(/\r?\n/);
+  
+  for (let i = 0; i < lines.length; i++) {
+    const rawLine = lines[i];
     if (!rawLine || !rawLine.trim()) continue;
-    const parts = rawLine.split('\t');
-    if (parts.length < 8) continue; // skip malformed
+    
+    // Handle weird spacing around tabs and pad with empty strings if needed
+    const parts = rawLine.split('\t').map(p => p.trim());
+    
+    // Pad with empty strings if less than 8 parts, but still need at least some data
+    if (parts.length < 3) {
+      badRows.push(i);
+      continue; // skip malformed - need at least first, last name, and one more field
+    }
+    
+    // Pad to ensure we have 8 parts
+    while (parts.length < 8) {
+      parts.push('');
+    }
 
     let [
       first_name,
@@ -166,7 +235,7 @@ async function insertGuestsFromTSV({ stay_id, default_checkout, guests_tsv }) {
 
     const nationality_alpha3 = (nationality || '').trim().toUpperCase().slice(0, 3) || null;
 
-    rows.push({
+    const guest = {
       stay_id: nullIfEmpty(stay_id),
       first_name: nullIfEmpty(first_name),
       middle_name: nullIfEmpty(middle_name),
@@ -179,10 +248,41 @@ async function insertGuestsFromTSV({ stay_id, default_checkout, guests_tsv }) {
       check_in_date: today,
       check_out_date: toYMD(checkout_date) || fallbackCheckout,
       photo_urls: []
-    });
+    };
+    
+    // Strict validation
+    const rowErrors = validateGuestRow(guest, i);
+    if (rowErrors.length > 0) {
+      validationErrors.push(...rowErrors);
+      badRows.push(i);
+      continue;
+    }
+    
+    rows.push(guest);
   }
 
-  if (!rows.length) return 0;
+  // Count countries for observability
+  const countryCounts = rows.reduce((acc, row) => {
+    if (row.nationality_alpha3) {
+      acc[row.nationality_alpha3] = (acc[row.nationality_alpha3] || 0) + 1;
+    }
+    return acc;
+  }, {});
+
+  if (!rows.length) {
+    logTSVOperation('tsv_validation_failed', {
+      stay_id,
+      total_lines: lines.length,
+      bad_rows: badRows,
+      validation_errors: validationErrors.length,
+      latency_ms: Date.now() - startTime
+    });
+    
+    if (validationErrors.length > 0) {
+      throw new Error(`Validation failed: ${validationErrors.join(', ')}`);
+    }
+    return 0;
+  }
 
   const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } = process.env || {};
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
@@ -205,11 +305,28 @@ async function insertGuestsFromTSV({ stay_id, default_checkout, guests_tsv }) {
 
   if (!resp.ok) {
     const txt = await resp.text();
+    logTSVOperation('tsv_insert_failed', {
+      stay_id,
+      total_rows: rows.length,
+      supabase_status: resp.status,
+      latency_ms: Date.now() - startTime
+    });
     throw new Error(`Supabase insert failed: ${resp.status} ${txt}`);
   }
 
   const inserted = await resp.json();
-  return Array.isArray(inserted) ? inserted.length : rows.length;
+  const insertedCount = Array.isArray(inserted) ? inserted.length : rows.length;
+  
+  logTSVOperation('tsv_insert_success', {
+    stay_id,
+    total_rows: rows.length,
+    inserted: insertedCount,
+    country_counts: countryCounts,
+    bad_rows: badRows.length > 0 ? badRows : undefined,
+    latency_ms: Date.now() - startTime
+  });
+  
+  return insertedCount;
 }
 // ================== /helpers ==================
 
@@ -1873,11 +1990,31 @@ const handler = async (req, res) => {
   // --- /passport-ocr (multipart images -> TSV via Google Vision) ---------------
   if (req.method === 'POST' && url.pathname === '/passport-ocr') {
     try {
+      // Content-Length limits for abuse prevention
+      const contentLength = parseInt(req.headers['content-length'] || '0');
+      const MAX_UPLOAD_SIZE = 10 * 1024 * 1024; // 10MB limit for images
+      
+      if (contentLength > MAX_UPLOAD_SIZE) {
+        res.statusCode = 413;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ error: 'payload_too_large', max_size: MAX_UPLOAD_SIZE }));
+        return;
+      }
+      
       const { files, default_checkout } = await parseMultipart(req);
       if (!files || !files.length) {
         res.statusCode = 400;
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({ error: 'no_images' }));
+        return;
+      }
+      
+      // Limit number of files
+      const MAX_FILES = 10;
+      if (files.length > MAX_FILES) {
+        res.statusCode = 400;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ error: 'too_many_files', max_files: MAX_FILES, received: files.length }));
         return;
       }
 
@@ -1910,12 +2047,38 @@ const handler = async (req, res) => {
   // --- /coco-gpt-batch-tsv route starts here ---
   if (req.method === 'POST' && url.pathname === '/coco-gpt-batch-tsv') {
     try {
+      // Size limits for abuse prevention
+      const contentLength = parseInt(req.headers['content-length'] || '0');
+      const MAX_PAYLOAD_SIZE = 1024 * 1024; // 1MB limit
+      
+      if (contentLength > MAX_PAYLOAD_SIZE) {
+        res.writeHead(413, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ ok: false, error: `Payload too large. Max ${MAX_PAYLOAD_SIZE} bytes` }));
+      }
+      
       const body = await parseBody(req);
       const { stay_id, default_checkout, guests_tsv } = body || {};
 
       if (!stay_id || !guests_tsv) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ ok: false, error: 'stay_id and guests_tsv required' }));
+      }
+      
+      // Line count limit
+      const lines = String(guests_tsv).split(/\r?\n/).filter(l => l.trim());
+      const MAX_LINES = 50;
+      
+      if (lines.length > MAX_LINES) {
+        logTSVOperation('tsv_rejected_too_many_lines', {
+          stay_id,
+          line_count: lines.length,
+          max_allowed: MAX_LINES
+        });
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ 
+          ok: false, 
+          error: `Too many lines in TSV. Max ${MAX_LINES} allowed, got ${lines.length}` 
+        }));
       }
 
       const inserted = await insertGuestsFromTSV({ stay_id, default_checkout, guests_tsv });
@@ -1928,6 +2091,13 @@ const handler = async (req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ ok: true, inserted }));
     } catch (err) {
+      // Log structured error for monitoring
+      logTSVOperation('tsv_error', {
+        error_type: err.name || 'UnknownError',
+        error_message: err.message.substring(0, 200), // Truncate for logs
+        stack_trace: process.env.NODE_ENV === 'development' ? err.stack : undefined
+      });
+      
       console.error('POST /coco-gpt-batch-tsv error:', err);
       res.writeHead(500, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ ok: false, error: err.message }));

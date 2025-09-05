@@ -696,7 +696,9 @@ function normalizeStayIdFreeform(raw){
   };
 }
 
-module.exports = async (req, res) => {
+const http = require('http');
+
+const handler = async (req, res) => {
   // ---------- HOTFIX: force-table route ----------
   try {
     const urlObj = new URL(req.url, 'https://x.local');
@@ -1681,6 +1683,24 @@ module.exports = async (req, res) => {
   res.setHeader('Content-Type','application/json');
   res.end(JSON.stringify({ ok:false, error:'Not Found' }));
 };
+
+if (require.main === module) {
+  const server = http.createServer((req, res) => {
+    handler(req, res).catch(err => {
+      console.error('Unhandled error:', err);
+      res.statusCode = 500;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ error: 'Internal server error' }));
+    });
+  });
+
+  const port = process.env.PORT || 8080;
+  server.listen(port, () => {
+    console.log(`Server listening on port ${port}`);
+  });
+} else {
+  module.exports = handler;
+}
 
 
 async function mergeOrInsertPassport(db, newGuest) {

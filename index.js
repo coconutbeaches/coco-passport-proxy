@@ -112,6 +112,107 @@ function resolveTemplateDates(urlStr){
 // --- Passport OCR helper functions -------------------------------------------
 function titleCase(s){ return s ? s.toLowerCase().replace(/\b\w/g, c => c.toUpperCase()) : s; }
 
+// ================== TSV INSERT HELPERS (drop near top of index.js) ==================
+function nullIfEmpty(v) {
+  const s = v == null ? '' : String(v).trim();
+  return s === '' ? null : s;
+}
+
+// Normalize "male/female/m/f/nb/other" etc. to single char M/F/X
+function normGender(input) {
+  const g = String(input || '').trim().toUpperCase();
+  if (g === 'M' || g === 'MALE') return 'M';
+  if (g === 'F' || g === 'FEMALE') return 'F';
+  if (g === 'X' || g === 'OTHER' || g === 'NONBINARY' || g === 'NB') return 'X';
+  return g.slice(0, 1) || null;
+}
+
+// Convert DD/MM/YYYY or "Sept 11" to YYYY-MM-DD in Asia/Bangkok
+function toYMD(input, tz = 'Asia/Bangkok') {
+  if (!input) return null;
+  const s = String(input).trim();
+  const m = s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (m) {
+    const [_, dd, mm, yyyy] = m;
+    return `${yyyy}-${mm}-${dd}`;
+  }
+  const d = new Date(s);
+  if (!isNaN(d.getTime())) {
+    return d.toLocaleDateString('en-CA', { timeZone: tz }); // YYYY-MM-DD
+  }
+  return null;
+}
+
+async function insertGuestsFromTSV({ stay_id, default_checkout, guests_tsv }) {
+  const rows = [];
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Bangkok' }); // YYYY-MM-DD
+  const fallbackCheckout = toYMD(default_checkout);
+
+  for (const rawLine of String(guests_tsv || '').split(/\r?\n/)) {
+    if (!rawLine || !rawLine.trim()) continue;
+    const parts = rawLine.split('\t');
+    if (parts.length < 8) continue; // skip malformed
+
+    let [
+      first_name,
+      middle_name,
+      last_name,
+      gender,
+      passport_number,
+      nationality,
+      birthday,
+      checkout_date
+    ] = parts;
+
+    const nationality_alpha3 = (nationality || '').trim().toUpperCase().slice(0, 3) || null;
+
+    rows.push({
+      stay_id: nullIfEmpty(stay_id),
+      first_name: nullIfEmpty(first_name),
+      middle_name: nullIfEmpty(middle_name),
+      last_name: nullIfEmpty(last_name),
+      gender: normGender(gender),
+      passport_number: nullIfEmpty(passport_number),
+      nationality_alpha3,
+      issuing_country_alpha3: nationality_alpha3,
+      birthday: toYMD(birthday),
+      check_in_date: today,
+      check_out_date: toYMD(checkout_date) || fallbackCheckout,
+      photo_urls: []
+    });
+  }
+
+  if (!rows.length) return 0;
+
+  const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } = process.env || {};
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+    throw new Error('Missing SUPABASE environment variables');
+  }
+
+  const resp = await fetch(`${SUPABASE_URL}/rest/v1/incoming_guests`, {
+    method: 'POST',
+    headers: {
+      apikey: SUPABASE_SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+      'Content-Type': 'application/json',
+      'Accept-Profile': 'public',
+      'Content-Profile': 'public',
+      // enable dedupe behavior just like your working curl
+      Prefer: 'return=representation,resolution=merge-duplicates'
+    },
+    body: JSON.stringify(rows)
+  });
+
+  if (!resp.ok) {
+    const txt = await resp.text();
+    throw new Error(`Supabase insert failed: ${resp.status} ${txt}`);
+  }
+
+  const inserted = await resp.json();
+  return Array.isArray(inserted) ? inserted.length : rows.length;
+}
+// ================== /helpers ==================
+
 function formatDDMMYYYY(s){
   const m = String(s || '').trim().match(/^(\d{2})[\/.\- ](\d{2})[\/.\- ](\d{4})$/);
   return m ? `${m[1].padStart(2,'0')}/${m[2].padStart(2,'0')}/${m[3]}` : '';
@@ -1804,6 +1905,35 @@ const handler = async (req, res) => {
     }
     return;
   }
+
+  // ================== ROUTE (place AFTER /passport-ocr and BEFORE 404) ==================
+  // --- /coco-gpt-batch-tsv route starts here ---
+  if (req.method === 'POST' && url.pathname === '/coco-gpt-batch-tsv') {
+    try {
+      const body = await parseBody(req);
+      const { stay_id, default_checkout, guests_tsv } = body || {};
+
+      if (!stay_id || !guests_tsv) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ ok: false, error: 'stay_id and guests_tsv required' }));
+      }
+
+      const inserted = await insertGuestsFromTSV({ stay_id, default_checkout, guests_tsv });
+
+      if (inserted === 0) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ ok: false, error: 'no valid TSV rows after parsing' }));
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ ok: true, inserted }));
+    } catch (err) {
+      console.error('POST /coco-gpt-batch-tsv error:', err);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ ok: false, error: err.message }));
+    }
+  }
+  // ================== /route ==================
 
   // Fallback
   res.statusCode = 404;

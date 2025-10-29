@@ -58,21 +58,89 @@ function parseVIZ(text) {
     return null;
   };
 
-  const last = pull(/SURNAME[:\s]*([A-Z \-']+)/, /NAAM[:\s]*([A-Z \-']+)/, /APELLIDOS?[:\s]*([A-Z \-']+)/);
-  const given = pull(/GIVEN NAMES?[:\s]*([A-Z \-']+)/, /VOORNAMEN[:\s]*([A-Z \-']+)/, /NOMBRES?[:\s]*([A-Z \-']+)/);
-  const number = pull(/(?:DOCUMENT|PASSPORT)\s?NO\.?[:\s]*([A-Z0-9]+)/, /DOCUMENTNR[:\s]*([A-Z0-9]+)/);
-  const nat = pull(/NATIONALITY[:\s]*([A-Z \-]+)/, /NATIONALITE[TÉ]?\s*[:\s]*([A-Z \-]+)/, /NATIONALITEIT[:\s]*([A-Z \-]+)/);
-  const dob = pull(/DATE OF BIRTH[:\s]*([0-9.\/\- ]+)/, /GEBOORTEDATUM[:\s]*([0-9.\/\- ]+)/, /FECHA DE NAC[:\s]*([0-9.\/\- ]+)/);
-  const sex = pull(/SEX[:\s]*([MFX])/, /GESLACHT[:\s]*([MVX])/, /SEXE[:\s]*([MFX])/);
-  const issue = pull(/DATE OF ISSUE[:\s]*([0-9.\/\- ]+)/, /DATE D'EMISSION[:\s]*([0-9.\/\- ]+)/, /UITGIFTEDATUM[:\s]*([0-9.\/\- ]+)/);
-  const expiry = pull(/DATE OF EXPIRY[:\s]*([0-9.\/\- ]+)/, /EXPIRATION[:\s]*([0-9.\/\- ]+)/, /VERVALDATUM[:\s]*([0-9.\/\- ]+)/);
+  // Enhanced patterns to handle US passport slash format (e.g., "Surname/Nom/Apellidos")
+  const last = pull(
+    /SURNAME\/[^\n]*\n\s*([A-Z][A-Z \-']+)/,  // US format: label on one line, value on next
+    /SURNAME[:\s]+([A-Z][A-Z \-']+)/,          // Standard format with colon/space
+    /NAAM[:\s]+([A-Z \-']+)/, 
+    /APELLIDOS?[:\s]+([A-Z \-']+)/
+  );
+  
+  const given = pull(
+    /GIVEN\s+NAMES?\/[^\n]*\n\s*([A-Z][A-Z \-']+)/,  // US format
+    /GIVEN\s+NAMES?[:\s]+([A-Z][A-Z \-']+)/,          // Standard format
+    /VOORNAMEN[:\s]+([A-Z \-']+)/, 
+    /NOMBRES?[:\s]+([A-Z \-']+)/
+  );
+  
+  // Passport number with more flexible matching
+  const number = pull(
+    /PASSPORT\s+NO\.?\/[^\n]*\n\s*([A-Z0-9]+)/,
+    /(?:DOCUMENT|PASSPORT)\s*NO\.?[:\s]*([A-Z0-9]+)/, 
+    /DOCUMENTNR[:\s]*([A-Z0-9]+)/,
+    /\b([A-Z]\d{8})\b/  // Common passport number format
+  );
+  
+  const nat = pull(
+    /NATIONALITY\/[^\n]*\n\s*([A-Z][A-Z \-]+)/,
+    /NATIONALITY[:\s]+([A-Z \-]+)/, 
+    /NATIONALITE[TÉ]?\s*[:\s]*([A-Z \-]+)/, 
+    /NATIONALITEIT[:\s]+([A-Z \-]+)/
+  );
+  
+  const dob = pull(
+    /DATE\s+OF\s+BIRTH\/[^\n]*\n\s*([0-9]{1,2}\s+[A-Z]{3}\s+[0-9]{4})/,  // US format: 03 SEP 1974
+    /DATE\s+OF\s+BIRTH[:\s]+([0-9.\/\- ]+)/, 
+    /GEBOORTEDATUM[:\s]+([0-9.\/\- ]+)/, 
+    /FECHA\s+DE\s+NAC[:\s]+([0-9.\/\- ]+)/
+  );
+  
+  const sex = pull(
+    /SEX\/[^\n]*\n\s*([MFX])/,
+    /SEX[:\s]+([MFX])/, 
+    /GESLACHT[:\s]+([MVX])/, 
+    /SEXE[:\s]+([MFX])/
+  );
+  
+  const issue = pull(
+    /DATE\s+OF\s+ISSUE\/[^\n]*\n\s*([0-9]{1,2}\s+[A-Z]{3}\s+[0-9]{4})/,
+    /DATE\s+OF\s+ISSUE[:\s]+([0-9.\/\- ]+)/, 
+    /DATE\s+D'EMISSION[:\s]+([0-9.\/\- ]+)/, 
+    /UITGIFTEDATUM[:\s]+([0-9.\/\- ]+)/
+  );
+  
+  const expiry = pull(
+    /DATE\s+OF\s+EXPIRATION\/[^\n]*\n\s*([0-9]{1,2}\s+[A-Z]{3}\s+[0-9]{4})/,
+    /DATE\s+OF\s+EXPIR[A-Z]*[:\s]+([0-9.\/\- ]+)/, 
+    /EXPIRATION[:\s]+([0-9.\/\- ]+)/, 
+    /VERVALDATUM[:\s]+([0-9.\/\- ]+)/
+  );
 
   const natAlpha3 = t => {
     if (!t) return '';
     const T = t.replace(/[^A-Z ]/g, '').trim();
-    if (/\bNLD\b|NETHERLANDS|NEDERLAND|PAYS BAS|PAYS-BAS/.test(T)) return 'NLD';
+    if (/\bUSA\b|UNITED\s+STATES/.test(T)) return 'USA';
+    if (/\bNLD\b|NETHERLANDS|NEDERLAND/.test(T)) return 'NLD';
+    if (/\bGBR\b|UNITED\s+KINGDOM/.test(T)) return 'GBR';
     const m = T.match(/\b[A-Z]{3}\b/);
     return m ? m[0] : '';
+  };
+  
+  // Parse dates in US format (03 SEP 1974) or DD/MM/YYYY
+  const parseDate = (dateStr) => {
+    if (!dateStr) return '';
+    // Try US format: 03 SEP 1974
+    const usMatch = dateStr.match(/(\d{1,2})\s+([A-Z]{3})\s+(\d{4})/);
+    if (usMatch) {
+      const [_, day, monthAbbr, year] = usMatch;
+      const months = {JAN:1,FEB:2,MAR:3,APR:4,MAY:5,JUN:6,JUL:7,AUG:8,SEP:9,OCT:10,NOV:11,DEC:12};
+      const month = months[monthAbbr];
+      if (month) {
+        return `${year}-${String(month).padStart(2,'0')}-${day.padStart(2,'0')}`;
+      }
+    }
+    // Fall back to DD/MM/YYYY format
+    return formatDDMMYYYY(dateStr);
   };
 
   const parts = (given || '').split(/[ ,]+/).filter(Boolean);
@@ -86,10 +154,10 @@ function parseVIZ(text) {
     gender: sex ? sex[0].toUpperCase() : '',
     passport_number: number ? number.replace(/\s+/g, '') : '',
     nationality_alpha3: natAlpha3(nat),
-    issuing_country_alpha3: natAlpha3(nat), // Default to nationality if not explicitly stated
-    birthday: formatDDMMYYYY(dob || '') || '',
-    passport_issue_date: formatDDMMYYYY(issue || '') || '',
-    passport_expiry_date: formatDDMMYYYY(expiry || '') || ''
+    issuing_country_alpha3: natAlpha3(nat),
+    birthday: parseDate(dob),
+    passport_issue_date: parseDate(issue),
+    passport_expiry_date: parseDate(expiry)
   };
 }
 

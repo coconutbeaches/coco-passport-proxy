@@ -223,7 +223,8 @@ async function handleMotherBrainGuestIntake(req, res) {
         g.passport_expiry_date ? `'${g.passport_expiry_date}'::date` : 'NULL',
         phone ? `'${phone.replace(/'/g, "''")}'` : 'NULL',
         nickname ? `'${nickname.replace(/'/g, "''")}'` : 'NULL',
-        notes ? `'${notes.replace(/'/g, "''")}'` : 'NULL'
+        notes ? `'${notes.replace(/'/g, "''")}'` : 'NULL',
+        `'motherbrain_ocr'`
       ];
       return `(${values.join(', ')})`;
     }).join(',\n  ');
@@ -233,25 +234,10 @@ INSERT INTO incoming_guests (
   stay_id, first_name, middle_name, last_name, gender,
   nationality_alpha3, issuing_country_alpha3, birthday,
   passport_number, passport_issue_date, passport_expiry_date,
-  phone_e164, nickname, notes
+  phone_e164, nickname, notes, source
 )
 VALUES
   ${insertStatements}
-ON CONFLICT (stay_id, first_name)
-DO UPDATE SET
-  middle_name = COALESCE(EXCLUDED.middle_name, incoming_guests.middle_name),
-  last_name = COALESCE(EXCLUDED.last_name, incoming_guests.last_name),
-  gender = COALESCE(EXCLUDED.gender, incoming_guests.gender),
-  nationality_alpha3 = COALESCE(EXCLUDED.nationality_alpha3, incoming_guests.nationality_alpha3),
-  issuing_country_alpha3 = COALESCE(EXCLUDED.issuing_country_alpha3, incoming_guests.issuing_country_alpha3),
-  birthday = COALESCE(EXCLUDED.birthday, incoming_guests.birthday),
-  passport_number = COALESCE(EXCLUDED.passport_number, incoming_guests.passport_number),
-  passport_issue_date = COALESCE(EXCLUDED.passport_issue_date, incoming_guests.passport_issue_date),
-  passport_expiry_date = COALESCE(EXCLUDED.passport_expiry_date, incoming_guests.passport_expiry_date),
-  phone_e164 = COALESCE(EXCLUDED.phone_e164, incoming_guests.phone_e164),
-  nickname = COALESCE(EXCLUDED.nickname, incoming_guests.nickname),
-  notes = COALESCE(EXCLUDED.notes, incoming_guests.notes),
-  updated_at = NOW()
 RETURNING id, stay_id, first_name, last_name;`;
 
     const motherbrainPayload = {

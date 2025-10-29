@@ -3,6 +3,9 @@ const { parse } = require('csv-parse/sync');
 const { CSV_TO_DB_MAPPING, DEFAULT_RECORD_VALUES } = require('./lib/tokeetFieldMap');
 const { ImageAnnotatorClient } = require('@google-cloud/vision');
 const busboy = require('busboy');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 
 // Base URL configuration with runtime safety check
 const PUBLIC_PASSPORT_PROXY_URL = 'https://coco-passport-proxy.vercel.app';
@@ -126,6 +129,29 @@ function resolveTemplateDates(urlStr){
 
 // --- Passport OCR helper functions -------------------------------------------
 function titleCase(s){ return s ? s.toLowerCase().replace(/\b\w/g, c => c.toUpperCase()) : s; }
+
+/**
+ * Creates Google Vision client with inline credentials for Vercel environment
+ * Falls back to default credentials if GOOGLE_APPLICATION_CREDENTIALS is a file path
+ */
+function createVisionClient() {
+  const credsEnv = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+  
+  if (!credsEnv) {
+    // No credentials set, use default (will fail gracefully)
+    return new ImageAnnotatorClient();
+  }
+  
+  // Check if it's JSON string or file path
+  try {
+    const credsObj = JSON.parse(credsEnv);
+    // It's JSON - use inline credentials
+    return new ImageAnnotatorClient({ credentials: credsObj });
+  } catch (e) {
+    // It's a file path - use default behavior
+    return new ImageAnnotatorClient();
+  }
+}
 
 // ================== TSV INSERT HELPERS (drop near top of index.js) ==================
 function nullIfEmpty(v) {
@@ -967,6 +993,7 @@ function normalizeStayIdFreeform(raw){
 }
 
 const http = require('http');
+const { handleMotherBrainGuestIntake } = require('./motherbrain-ocr');
 
 const handler = async (req, res) => {
   // ---------- HOTFIX: force-table route ----------
@@ -1959,7 +1986,7 @@ const handler = async (req, res) => {
         return;
       }
 
-      const client = new ImageAnnotatorClient();
+      const client = createVisionClient();
       const [result] = await client.textDetection(body.imageUrl);
       const detections = result?.textAnnotations || [];
       const fullText = detections.length > 0 ? detections[0].description : '';
@@ -2006,7 +2033,7 @@ const handler = async (req, res) => {
         return;
       }
 
-      const client = new ImageAnnotatorClient(); // uses GOOGLE_APPLICATION_CREDENTIALS
+      const client = createVisionClient(); // uses inline credentials or file path
       const guests = [];
       for (const buf of files) {
         const [result] = await client.documentTextDetection({ image: { content: buf } });
@@ -2103,6 +2130,12 @@ const handler = async (req, res) => {
     }
   }
   // ================== /route ==================
+
+  // --- /motherbrain/guest-intake (OCR + MotherBrainGPT integration) -----------
+  if (req.method === 'POST' && url.pathname === '/motherbrain/guest-intake') {
+    await handleMotherBrainGuestIntake(req, res);
+    return;
+  }
 
   // Fallback
   res.statusCode = 404;

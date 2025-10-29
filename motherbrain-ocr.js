@@ -75,10 +75,10 @@ function parseVIZ(text) {
   
   // Passport number with more flexible matching
   const number = pull(
-    /PASSPORT\s+NO\.?\/[^\n]*\n\s*([A-Z0-9]+)/,
-    /(?:DOCUMENT|PASSPORT)\s*NO\.?[:\s]*([A-Z0-9]+)/, 
-    /DOCUMENTNR[:\s]*([A-Z0-9]+)/,
-    /\b([A-Z]\d{8})\b/  // Common passport number format
+    /PASSPORT\s+NO\.?\/[^\n]*\n\s*([A-Z0-9]{6,12})/,  // US format, longer to avoid matching codes
+    /(?:DOCUMENT|PASSPORT)\s*NO\.?[:\s]*([A-Z0-9]{6,12})/, 
+    /DOCUMENTNR[:\s]*([A-Z0-9]{6,12})/,
+    /\b([A-Z]\d{8,9})\b/  // Common passport number format (letter + 8-9 digits)
   );
   
   const nat = pull(

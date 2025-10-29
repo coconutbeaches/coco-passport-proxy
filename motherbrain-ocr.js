@@ -274,86 +274,68 @@ async function handleMotherBrainGuestIntake(req, res) {
       return;
     }
 
-    // Prepare SQL INSERT statement for MotherBrainGPT API
-    // Build INSERT statements for each guest
-    const insertStatements = guests.map((g, idx) => {
-      const values = [
-        stay_id ? `'${stay_id.replace(/'/g, "''")}'` : 'NULL',
-        g.first_name ? `'${g.first_name.replace(/'/g, "''")}'` : 'NULL',
-        g.middle_name ? `'${g.middle_name.replace(/'/g, "''")}'` : 'NULL',
-        g.last_name ? `'${g.last_name.replace(/'/g, "''")}'` : 'NULL',
-        g.gender ? `'${g.gender}'` : 'NULL',
-        g.nationality_alpha3 ? `'${g.nationality_alpha3}'` : 'NULL',
-        g.issuing_country_alpha3 ? `'${g.issuing_country_alpha3}'` : 'NULL',
-        g.birthday ? `'${g.birthday}'::date` : 'NULL',
-        g.passport_number ? `'${g.passport_number.replace(/'/g, "''")}'` : 'NULL',
-        g.passport_issue_date ? `'${g.passport_issue_date}'::date` : 'NULL',
-        g.passport_expiry_date ? `'${g.passport_expiry_date}'::date` : 'NULL',
-        phone ? `'${phone.replace(/'/g, "''")}'` : 'NULL',
-        nickname ? `'${nickname.replace(/'/g, "''")}'` : 'NULL',
-        notes ? `'${notes.replace(/'/g, "''")}'` : 'NULL',
-        `'motherbrain_ocr'`
-      ];
-      return `(${values.join(', ')})`;
-    }).join(',\n  ');
+    // No SQL generation needed - using REST API directly
 
-    const sql = `
-INSERT INTO incoming_guests (
-  stay_id, first_name, middle_name, last_name, gender,
-  nationality_alpha3, issuing_country_alpha3, birthday,
-  passport_number, passport_issue_date, passport_expiry_date,
-  phone_e164, nickname, notes, source
-)
-VALUES
-  ${insertStatements}
-RETURNING id, stay_id, first_name, last_name;`;
+    // Prepare payload for direct Supabase REST API insert
+    const guestRecords = guests.map(g => ({
+      stay_id: stay_id || null,
+      first_name: g.first_name || null,
+      middle_name: g.middle_name || null,
+      last_name: g.last_name || null,
+      gender: g.gender || null,
+      nationality_alpha3: g.nationality_alpha3 || null,
+      issuing_country_alpha3: g.issuing_country_alpha3 || null,
+      birthday: g.birthday || null,
+      passport_number: g.passport_number || null,
+      passport_issue_date: g.passport_issue_date || null,
+      passport_expiry_date: g.passport_expiry_date || null,
+      phone_e164: phone || null,
+      nickname: nickname || null,
+      notes: notes || null,
+      source: 'motherbrain_ocr'
+    }));
 
-    const motherbrainPayload = {
-      arguments: {
-        query: sql
-      }
-    };
-
-    // Call MotherBrainGPT API with execute_sql tool
-    const MOTHERBRAIN_API_URL = process.env.MOTHERBRAIN_API_URL || 
-                                'https://supabase-mcp-fly.fly.dev/api/tools/execute_sql';
-    const MOTHERBRAIN_API_KEY = process.env.MOTHERBRAIN_API_KEY;
-
-    if (!MOTHERBRAIN_API_KEY) {
-      console.error('MOTHERBRAIN_API_KEY not configured');
+    // Use Supabase REST API directly (not the read-only MCP)
+    const SUPABASE_URL = process.env.SUPABASE_URL;
+    const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    
+    if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+      console.error('SUPABASE credentials not configured');
       res.statusCode = 500;
       res.setHeader('Content-Type', 'application/json');
       res.end(JSON.stringify({
         ok: false,
-        error: 'MotherBrainGPT API key not configured',
+        error: 'Supabase credentials not configured',
         guests_parsed: guests.length,
         guests
       }));
       return;
     }
 
-    // Debug logging (safe - no full key exposure)
-    console.log('[MotherBrain Debug] API Key status:', MOTHERBRAIN_API_KEY ? '✅ present' : '❌ missing');
-    console.log('[MotherBrain Debug] API Key prefix:', MOTHERBRAIN_API_KEY ? `${MOTHERBRAIN_API_KEY.slice(0, 10)}...` : 'N/A');
-    console.log('[MotherBrain Debug] API URL:', MOTHERBRAIN_API_URL);
+    // Debug logging
     console.log('[MotherBrain Debug] Guest count:', guests.length);
-    console.log('[MotherBrain Debug] SQL query length:', sql.length);
+    console.log('[MotherBrain Debug] Supabase URL:', SUPABASE_URL ? '✅ present' : '❌ missing');
 
     let apiResponse;
     try {
-      const response = await fetch(MOTHERBRAIN_API_URL, {
+      // Insert directly into Supabase via REST API
+      const response = await fetch(`${SUPABASE_URL}/rest/v1/incoming_guests`, {
         method: 'POST',
         headers: {
+          'apikey': SUPABASE_SERVICE_ROLE_KEY,
+          'Authorization': `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${MOTHERBRAIN_API_KEY}`
+          'Accept-Profile': 'public',
+          'Content-Profile': 'public',
+          'Prefer': 'return=representation'
         },
-        body: JSON.stringify(motherbrainPayload)
+        body: JSON.stringify(guestRecords)
       });
 
       const responseText = await response.text();
       
       if (!response.ok) {
-        throw new Error(`MotherBrainGPT API returned ${response.status}: ${responseText}`);
+        throw new Error(`Supabase API returned ${response.status}: ${responseText}`);
       }
 
       try {
@@ -362,12 +344,12 @@ RETURNING id, stay_id, first_name, last_name;`;
         apiResponse = { raw: responseText };
       }
     } catch (apiError) {
-      console.error('MotherBrainGPT API call failed:', apiError);
+      console.error('Supabase API call failed:', apiError);
       res.statusCode = 500;
       res.setHeader('Content-Type', 'application/json');
       res.end(JSON.stringify({
         ok: false,
-        error: `Failed to send data to MotherBrainGPT: ${apiError.message}`,
+        error: `Failed to insert into database: ${apiError.message}`,
         guests_parsed: guests.length,
         guests
       }));
@@ -380,11 +362,11 @@ RETURNING id, stay_id, first_name, last_name;`;
     res.end(JSON.stringify({
       ok: true,
       stay_id: stay_id,
-      inserted: guests.length,
-      message: 'Guests parsed and sent to MotherBrainGPT',
+      inserted: Array.isArray(apiResponse) ? apiResponse.length : guests.length,
+      message: 'Guests parsed and inserted into database',
       guests,
       ocr_errors: errors.length > 0 ? errors : undefined,
-      motherbrain_response: apiResponse
+      database_response: apiResponse
     }));
 
   } catch (err) {

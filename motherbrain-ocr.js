@@ -206,21 +206,63 @@ async function handleMotherBrainGuestIntake(req, res) {
       return;
     }
 
-    // Prepare payload for MotherBrainGPT API
+    // Prepare SQL INSERT statement for MotherBrainGPT API
+    // Build INSERT statements for each guest
+    const insertStatements = guests.map((g, idx) => {
+      const values = [
+        stay_id ? `'${stay_id.replace(/'/g, "''")}'` : 'NULL',
+        g.first_name ? `'${g.first_name.replace(/'/g, "''")}'` : 'NULL',
+        g.middle_name ? `'${g.middle_name.replace(/'/g, "''")}'` : 'NULL',
+        g.last_name ? `'${g.last_name.replace(/'/g, "''")}'` : 'NULL',
+        g.gender ? `'${g.gender}'` : 'NULL',
+        g.nationality_alpha3 ? `'${g.nationality_alpha3}'` : 'NULL',
+        g.issuing_country_alpha3 ? `'${g.issuing_country_alpha3}'` : 'NULL',
+        g.birthday ? `'${g.birthday}'::date` : 'NULL',
+        g.passport_number ? `'${g.passport_number.replace(/'/g, "''")}'` : 'NULL',
+        g.passport_issue_date ? `'${g.passport_issue_date}'::date` : 'NULL',
+        g.passport_expiry_date ? `'${g.passport_expiry_date}'::date` : 'NULL',
+        phone ? `'${phone.replace(/'/g, "''")}'` : 'NULL',
+        nickname ? `'${nickname.replace(/'/g, "''")}'` : 'NULL',
+        notes ? `'${notes.replace(/'/g, "''")}'` : 'NULL'
+      ];
+      return `(${values.join(', ')})`;
+    }).join(',\n  ');
+
+    const sql = `
+INSERT INTO incoming_guests (
+  stay_id, first_name, middle_name, last_name, gender,
+  nationality_alpha3, issuing_country_alpha3, birthday,
+  passport_number, passport_issue_date, passport_expiry_date,
+  phone_e164, nickname, notes
+)
+VALUES
+  ${insertStatements}
+ON CONFLICT (stay_id, first_name)
+DO UPDATE SET
+  middle_name = COALESCE(EXCLUDED.middle_name, incoming_guests.middle_name),
+  last_name = COALESCE(EXCLUDED.last_name, incoming_guests.last_name),
+  gender = COALESCE(EXCLUDED.gender, incoming_guests.gender),
+  nationality_alpha3 = COALESCE(EXCLUDED.nationality_alpha3, incoming_guests.nationality_alpha3),
+  issuing_country_alpha3 = COALESCE(EXCLUDED.issuing_country_alpha3, incoming_guests.issuing_country_alpha3),
+  birthday = COALESCE(EXCLUDED.birthday, incoming_guests.birthday),
+  passport_number = COALESCE(EXCLUDED.passport_number, incoming_guests.passport_number),
+  passport_issue_date = COALESCE(EXCLUDED.passport_issue_date, incoming_guests.passport_issue_date),
+  passport_expiry_date = COALESCE(EXCLUDED.passport_expiry_date, incoming_guests.passport_expiry_date),
+  phone_e164 = COALESCE(EXCLUDED.phone_e164, incoming_guests.phone_e164),
+  nickname = COALESCE(EXCLUDED.nickname, incoming_guests.nickname),
+  notes = COALESCE(EXCLUDED.notes, incoming_guests.notes),
+  updated_at = NOW()
+RETURNING id, stay_id, first_name, last_name;`;
+
     const motherbrainPayload = {
-      guests: guests.map(g => ({
-        ...g,
-        _stay_id: stay_id,
-        _phone: phone,
-        _nickname: nickname,
-        _display_name: display_name,
-        _notes: notes
-      }))
+      arguments: {
+        query: sql
+      }
     };
 
-    // Call MotherBrainGPT API
+    // Call MotherBrainGPT API with execute_sql tool
     const MOTHERBRAIN_API_URL = process.env.MOTHERBRAIN_API_URL || 
-                                'https://supabase-mcp-fly.fly.dev/api/tools/upsert_guest_from_checkin';
+                                'https://supabase-mcp-fly.fly.dev/api/tools/execute_sql';
     const MOTHERBRAIN_API_KEY = process.env.MOTHERBRAIN_API_KEY;
 
     if (!MOTHERBRAIN_API_KEY) {
@@ -235,6 +277,12 @@ async function handleMotherBrainGuestIntake(req, res) {
       }));
       return;
     }
+
+    // Debug logging (safe - no full key exposure)
+    console.log('[MotherBrain Debug] API Key status:', MOTHERBRAIN_API_KEY ? '✅ present' : '❌ missing');
+    console.log('[MotherBrain Debug] API Key prefix:', MOTHERBRAIN_API_KEY ? `${MOTHERBRAIN_API_KEY.slice(0, 10)}...` : 'N/A');
+    console.log('[MotherBrain Debug] API URL:', MOTHERBRAIN_API_URL);
+    console.log('[MotherBrain Debug] Payload guest count:', motherbrainPayload.guests.length);
 
     let apiResponse;
     try {

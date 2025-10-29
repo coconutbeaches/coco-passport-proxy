@@ -282,7 +282,8 @@ RETURNING id, stay_id, first_name, last_name;`;
     console.log('[MotherBrain Debug] API Key status:', MOTHERBRAIN_API_KEY ? '✅ present' : '❌ missing');
     console.log('[MotherBrain Debug] API Key prefix:', MOTHERBRAIN_API_KEY ? `${MOTHERBRAIN_API_KEY.slice(0, 10)}...` : 'N/A');
     console.log('[MotherBrain Debug] API URL:', MOTHERBRAIN_API_URL);
-    console.log('[MotherBrain Debug] Payload guest count:', motherbrainPayload.guests.length);
+    console.log('[MotherBrain Debug] Guest count:', guests.length);
+    console.log('[MotherBrain Debug] SQL query length:', sql.length);
 
     let apiResponse;
     try {

@@ -1,0 +1,292 @@
+openapi: 3.1.0
+info:
+  title: Coconut Passport Proxy - CocoGPT Integration
+  version: 3.0.0
+  description: |
+    Simple passport guest insertion API for CocoGPT.
+    Extracts passport data from images and inserts into Supabase with exact stay_id preservation.
+
+    Key Features:
+    - Preserves stay_id EXACTLY as provided (no normalization)
+    - Creates guest rows (row_type='guest', guest_journey='in_house')
+    - Automatic international character normalization for names only
+    - Simple JSON request/response format
+
+servers:
+  - url: https://coco-passport-proxy.vercel.app
+    description: Production server
+
+security: []
+
+paths:
+  /add-passport-guests:
+    post:
+      operationId: addPassportGuests
+      summary: Add passport guest records with exact stay_id preservation
+      description: |
+        Insert passport guest records into the incoming_guests table.
+        - Creates separate guest rows (row_type='guest')
+        - Sets guest_journey='in_house'
+        - Preserves stay_id EXACTLY as provided (no normalization)
+        - Normalizes international characters in names only (ö→o, ü→u, é→e)
+
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddPassportGuestsRequest"
+            examples:
+              minimal:
+                summary: Minimal example
+                value:
+                  stay_id: NH_Mantel
+                  guests:
+                    - first_name: John
+                      last_name: Smith
+                      passport_number: "123456789"
+
+              full:
+                summary: Full passport data
+                value:
+                  stay_id: NH_Mantel
+                  guests:
+                    - first_name: John
+                      middle_name: Robert
+                      last_name: Smith
+                      gender: M
+                      passport_number: "123456789"
+                      nationality_alpha3: USA
+                      issuing_country_alpha3: USA
+                      birthday: "1990-01-15"
+                      passport_issue_date: "2020-01-01"
+                      passport_expiry_date: "2030-01-01"
+
+              multiple:
+                summary: Multiple guests
+                value:
+                  stay_id: A6_CHRISTEN
+                  guests:
+                    - first_name: Michael
+                      last_name: Johnson
+                      gender: M
+                      passport_number: US1234567
+                      nationality_alpha3: USA
+                      birthday: "1985-05-20"
+                    - first_name: Sarah
+                      last_name: Johnson
+                      gender: F
+                      passport_number: US7654321
+                      nationality_alpha3: USA
+                      birthday: "1987-08-15"
+
+      responses:
+        "200":
+          description: Success response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AddPassportGuestsResponse"
+              examples:
+                success:
+                  summary: All guests inserted successfully
+                  value:
+                    ok: true
+                    inserted: 2
+                    stay_id: NH_Mantel
+                    guests:
+                      - id: 123e4567-e89b-12d3-a456-426614174000
+                        first_name: John
+                        last_name: Smith
+                        passport_number: "123456789"
+                      - id: 223e4567-e89b-12d3-a456-426614174001
+                        first_name: Jane
+                        last_name: Smith
+                        passport_number: "987654321"
+
+                partial:
+                  summary: Partial success (some failed)
+                  value:
+                    ok: true
+                    inserted: 1
+                    stay_id: NH_Mantel
+                    guests:
+                      - id: 123e4567-e89b-12d3-a456-426614174000
+                        first_name: John
+                        last_name: Smith
+                        passport_number: "123456789"
+                    partial_success: true
+                    errors:
+                      - index: 1
+                        error: Duplicate passport number
+                        detail: Key (passport_number)=(987654321) already exists
+                        guest:
+                          first_name: Jane
+                          passport_number: "987654321"
+
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  schemas:
+    AddPassportGuestsRequest:
+      type: object
+      required:
+        - stay_id
+        - guests
+      properties:
+        stay_id:
+          type: string
+          description: |
+            Stay identifier - will be preserved EXACTLY as provided.
+            Examples: "NH_Mantel", "A6_CHRISTEN", "BEACHHOUSE_JOHNSON"
+            DO NOT normalize or modify this value.
+          example: NH_Mantel
+        guests:
+          type: array
+          description: Array of guest passport data
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/GuestPassportData"
+
+    GuestPassportData:
+      type: object
+      required:
+        - first_name
+      properties:
+        first_name:
+          type: string
+          description: Guest first name (REQUIRED). International characters will be auto-normalized.
+          example: John
+        middle_name:
+          type: string
+          description: Guest middle name (optional)
+          example: Robert
+        last_name:
+          type: string
+          description: Guest last name (optional)
+          example: Smith
+        gender:
+          type: string
+          description: Gender - M or F
+          enum:
+            - M
+            - F
+          example: M
+        passport_number:
+          type: string
+          description: Passport number (optional but recommended)
+          example: "123456789"
+        nationality_alpha3:
+          type: string
+          description: Nationality as 3-letter ISO country code (e.g., USA, DEU, THA)
+          example: USA
+          pattern: "^[A-Z]{3}$"
+        issuing_country_alpha3:
+          type: string
+          description: Issuing country as 3-letter ISO code (e.g., USA, DEU, THA)
+          example: USA
+          pattern: "^[A-Z]{3}$"
+        birthday:
+          type: string
+          description: Birth date in YYYY-MM-DD format
+          format: date
+          example: "1990-01-15"
+        passport_issue_date:
+          type: string
+          description: Passport issue date in YYYY-MM-DD format
+          format: date
+          example: "2020-01-01"
+        passport_expiry_date:
+          type: string
+          description: Passport expiry date in YYYY-MM-DD format
+          format: date
+          example: "2030-01-01"
+
+    AddPassportGuestsResponse:
+      type: object
+      required:
+        - ok
+        - inserted
+        - stay_id
+        - guests
+      properties:
+        ok:
+          type: boolean
+          description: Request success status
+          example: true
+        inserted:
+          type: integer
+          description: Number of guests successfully inserted
+          example: 2
+        stay_id:
+          type: string
+          description: The stay_id from the request (preserved exactly)
+          example: NH_Mantel
+        guests:
+          type: array
+          description: Successfully inserted guest records
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                format: uuid
+                description: Database ID of inserted guest
+              first_name:
+                type: string
+                description: Guest first name
+              last_name:
+                type: string
+                description: Guest last name
+              passport_number:
+                type: string
+                description: Passport number
+        partial_success:
+          type: boolean
+          description: True if some guests failed to insert
+          example: false
+        errors:
+          type: array
+          description: Errors for guests that failed to insert
+          items:
+            type: object
+            properties:
+              index:
+                type: integer
+                description: Index of the failed guest in the original array
+              error:
+                type: string
+                description: Error message
+              detail:
+                type: string
+                description: Detailed error information
+              guest:
+                type: object
+                description: The guest data that failed
+
+    ErrorResponse:
+      type: object
+      required:
+        - ok
+        - error
+      properties:
+        ok:
+          type: boolean
+          description: Always false for errors
+          example: false
+        error:
+          type: string
+          description: Error message
+          example: stay_id (string) is required

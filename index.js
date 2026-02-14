@@ -2229,11 +2229,11 @@ const handler = async (req, res) => {
             // Insert guest row
             const insertQuery = `
               INSERT INTO incoming_guests (
-                stay_id, booking_id, source, row_type, phone_e164,
+                stay_id, booking_id, source, row_type, phone_e164, guest_journey,
                 first_name, middle_name, last_name, gender,
                 passport_number, nationality_alpha3, issuing_country_alpha3,
                 birthday, passport_issue_date, passport_expiry_date
-              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
               RETURNING id, first_name, last_name, passport_number
             `;
 
@@ -2243,6 +2243,7 @@ const handler = async (req, res) => {
               normalizedGuest.source,
               normalizedGuest.row_type,
               normalizedGuest.phone_e164,
+              'pending_intake', // guest_journey default value
               normalizedGuest.first_name,
               normalizedGuest.middle_name,
               normalizedGuest.last_name,

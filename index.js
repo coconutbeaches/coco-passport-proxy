@@ -1330,9 +1330,12 @@ const handler = async (req, res) => {
 
   // --- /coco-gpt-batch-passport (CocoGPT batch processing) --------------------
   if (req.method === 'POST' && url.pathname === '/coco-gpt-batch-passport') {
+    console.log('🔴 OLD /coco-gpt-batch-passport endpoint called at', new Date().toISOString());
+    console.log('⚠️  WARNING: This endpoint normalizes stay_id - should use /add-passport-guests instead');
     try {
       const body = await parseBody(req).catch(() => ({}));
       const { stay_id, passports, mrz_list } = body;
+      console.log('📝 Received stay_id:', JSON.stringify(stay_id));
       
       // Handle mrz_list format from CocoGPT YAML (array of MRZ line pairs)
       let passportsToProcess = passports;
@@ -2140,9 +2143,12 @@ const handler = async (req, res) => {
   // --- /add-passport-guests (Simple passport guest insertion) -----------------
   // Sets guest_journey='in_house' for new passport entries
   if (req.method === 'POST' && url.pathname === '/add-passport-guests') {
+    console.log('🟢 /add-passport-guests endpoint called at', new Date().toISOString());
     try {
       const body = await parseBody(req).catch(() => ({}));
       const { stay_id, guests } = body;
+      console.log('📝 Received stay_id:', JSON.stringify(stay_id));
+      console.log('📝 Number of guests:', guests?.length);
 
       // Validate input
       if (!stay_id || typeof stay_id !== 'string') {

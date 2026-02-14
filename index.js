@@ -2243,7 +2243,7 @@ const handler = async (req, res) => {
               normalizedGuest.source,
               normalizedGuest.row_type,
               normalizedGuest.phone_e164,
-              'pending_intake', // guest_journey default value
+              'in_house', // guest_journey - passports added while guests are in-house
               normalizedGuest.first_name,
               normalizedGuest.middle_name,
               normalizedGuest.last_name,

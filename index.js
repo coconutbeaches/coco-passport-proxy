@@ -2138,6 +2138,7 @@ const handler = async (req, res) => {
   }
 
   // --- /add-passport-guests (Simple passport guest insertion) -----------------
+  // Sets guest_journey='in_house' for new passport entries
   if (req.method === 'POST' && url.pathname === '/add-passport-guests') {
     try {
       const body = await parseBody(req).catch(() => ({}));

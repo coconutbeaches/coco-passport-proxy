@@ -2,16 +2,28 @@
 
 A Node.js API service for processing passport data and Tokeet booking feeds for the Coconut Beach Bungalows reservation system.
 
+## 🚀 Quick Start: CocoGPT Passport Workflow
+
+**You provide to CocoGPT:**
+1. Passport images (photos)
+2. stay_id (e.g., "A6_CHRISTEN")
+
+**CocoGPT automatically:**
+1. Extracts passport data from images
+2. Normalizes international characters
+3. Inserts guest rows into `incoming_guests` table
+
+See **COCOGPT_PASSPORT_WORKFLOW.md** for the complete guide.
+
 ## Features
 
-- **Passport Processing**: OCR passport data extraction and storage with dedicated microservice
-- **Tokeet Integration**: Automated CSV/JSON feed processing from Tokeet booking system
-- **Multi-format Support**: Handles both CSV and JSON data formats
-- **Database Integration**: Supabase integration with automatic upsert capabilities
-- **File Storage**: Image upload to Supabase Storage
-- **Stay ID Resolution**: Intelligent room and guest name parsing
-- **PaddleOCR Service**: Cloud Run-based OCR processing of passport images
-- **Proxy API**: Vercel serverless proxy for OCR service integration
+- **🎯 CocoGPT Integration**: Simple passport photo → database workflow
+- **🌍 Character Normalization**: Automatic handling of international characters (ø→o, ü→u, etc.)
+- **✅ Constraint Safety**: Automatically handles database constraints and triggers
+- **📸 Passport Processing**: OCR passport data extraction and storage
+- **📊 Tokeet Integration**: Automated CSV/JSON feed processing from Tokeet booking system
+- **🗄️ Database Integration**: Supabase integration with automatic upsert capabilities
+- **🔍 Stay ID Resolution**: Intelligent room and guest name parsing
 
 ## Environment Requirements
 
@@ -98,6 +110,83 @@ The system supports the following Tokeet CSV fields with automatic type coercion
 - **raw_json** → Original CSV row data
 
 ## API Endpoints
+
+### `/add-passport-guests`
+
+**Simple endpoint to add passport guest records to an existing stay.**
+
+This endpoint creates separate guest rows for each passport, following the "one guest row per passport" model. It does NOT update the existing booking row.
+
+**Method:** `POST`
+
+**Request Body:**
+```json
+{
+  "stay_id": "A6_CHRISTEN",
+  "guests": [
+    {
+      "first_name": "John",
+      "middle_name": "",
+      "last_name": "Smith",
+      "gender": "M",
+      "passport_number": "123456789",
+      "nationality_alpha3": "USA",
+      "issuing_country_alpha3": "USA",
+      "birthday": "1990-01-15",
+      "passport_issue_date": "2020-01-01",
+      "passport_expiry_date": "2030-01-01"
+    }
+  ]
+}
+```
+
+**Success Response:**
+```json
+{
+  "ok": true,
+  "inserted": 1,
+  "stay_id": "A6_CHRISTEN",
+  "guests": [
+    {
+      "id": 123,
+      "first_name": "John",
+      "last_name": "Smith",
+      "passport_number": "123456789"
+    }
+  ]
+}
+```
+
+**Features:**
+- **Character Normalization**: Automatically normalizes international characters (ø→o, ü→u, é→e, etc.)
+- **Separate Guest Rows**: Creates new guest rows, never updates booking rows
+- **Constraint Safety**: Sets `booking_id=NULL` and `phone_e164=NULL` to avoid unique constraint violations
+- **Trigger Management**: Automatically disables/re-enables `trg_enforce_stayid_shortform` trigger
+- **Error Handling**: Returns partial success with detailed error messages for failed insertions
+
+**Example cURL Call:**
+
+```bash
+curl -X POST https://coco-passport-proxy.vercel.app/add-passport-guests \
+  -H "Content-Type: application/json" \
+  -d '{
+    "stay_id": "A6_CHRISTEN",
+    "guests": [
+      {
+        "first_name": "John",
+        "last_name": "Smith",
+        "gender": "M",
+        "passport_number": "123456789",
+        "nationality_alpha3": "USA",
+        "birthday": "1990-01-15"
+      }
+    ]
+  }'
+```
+
+See `examples/add-passport-guests-example.js` for more usage examples.
+
+---
 
 ### `/tokeet-upsert`
 

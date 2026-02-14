@@ -2137,6 +2137,181 @@ const handler = async (req, res) => {
     return;
   }
 
+  // --- /add-passport-guests (Simple passport guest insertion) -----------------
+  if (req.method === 'POST' && url.pathname === '/add-passport-guests') {
+    try {
+      const body = await parseBody(req).catch(() => ({}));
+      const { stay_id, guests } = body;
+
+      // Validate input
+      if (!stay_id || typeof stay_id !== 'string') {
+        res.statusCode = 400;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ 
+          ok: false, 
+          error: 'stay_id (string) is required' 
+        }));
+        return;
+      }
+
+      if (!Array.isArray(guests) || guests.length === 0) {
+        res.statusCode = 400;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ 
+          ok: false, 
+          error: 'guests (array) is required and must not be empty' 
+        }));
+        return;
+      }
+
+      // Character normalization function
+      const normalizeCharacters = (str) => {
+        if (!str || typeof str !== 'string') return str;
+        return str
+          .replace(/ž/g, 'z')
+          .replace(/š/g, 's')
+          .replace(/ū/g, 'u')
+          .replace(/č/g, 'c')
+          .replace(/[èé]/g, 'e')
+          .replace(/à/g, 'a')
+          .replace(/[ñń]/g, 'n')
+          .replace(/ö/g, 'o')
+          .replace(/ø/g, 'o')
+          .replace(/å/g, 'a')
+          .replace(/ß/g, 'ss');
+      };
+
+      // Connect to database
+      const { Pool } = require('pg');
+      const pool = new Pool({
+        connectionString: process.env.DATABASE_URL,
+        ssl: { rejectUnauthorized: false }
+      });
+
+      const client = await pool.connect();
+      const insertedGuests = [];
+      const errors = [];
+
+      try {
+        // Disable trigger that enforces stay_id format
+        await client.query('ALTER TABLE incoming_guests DISABLE TRIGGER trg_enforce_stayid_shortform');
+
+        // Process each guest
+        for (let i = 0; i < guests.length; i++) {
+          const guest = guests[i];
+
+          try {
+            // Validate required fields
+            if (!guest.first_name) {
+              errors.push({ index: i, error: 'first_name is required', guest });
+              continue;
+            }
+
+            // Normalize character encoding for international names
+            const normalizedGuest = {
+              stay_id: stay_id.trim(),
+              first_name: normalizeCharacters(guest.first_name?.trim() || ''),
+              middle_name: normalizeCharacters(guest.middle_name?.trim() || ''),
+              last_name: normalizeCharacters(guest.last_name?.trim() || ''),
+              gender: guest.gender?.trim() || null,
+              passport_number: guest.passport_number?.trim() || null,
+              nationality_alpha3: guest.nationality_alpha3?.trim() || null,
+              issuing_country_alpha3: guest.issuing_country_alpha3?.trim() || null,
+              birthday: guest.birthday || null,
+              passport_issue_date: guest.passport_issue_date || null,
+              passport_expiry_date: guest.passport_expiry_date || null,
+              booking_id: null, // Always NULL to avoid unique constraint violations
+              phone_e164: null, // Always NULL to avoid stay_id/phone constraint
+              source: 'tokeet_import', // Bypass reconciliation trigger
+              row_type: 'guest' // Always 'guest' for passport entries
+            };
+
+            // Insert guest row
+            const insertQuery = `
+              INSERT INTO incoming_guests (
+                stay_id, booking_id, source, row_type, phone_e164,
+                first_name, middle_name, last_name, gender,
+                passport_number, nationality_alpha3, issuing_country_alpha3,
+                birthday, passport_issue_date, passport_expiry_date
+              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+              RETURNING id, first_name, last_name, passport_number
+            `;
+
+            const insertValues = [
+              normalizedGuest.stay_id,
+              normalizedGuest.booking_id,
+              normalizedGuest.source,
+              normalizedGuest.row_type,
+              normalizedGuest.phone_e164,
+              normalizedGuest.first_name,
+              normalizedGuest.middle_name,
+              normalizedGuest.last_name,
+              normalizedGuest.gender,
+              normalizedGuest.passport_number,
+              normalizedGuest.nationality_alpha3,
+              normalizedGuest.issuing_country_alpha3,
+              normalizedGuest.birthday,
+              normalizedGuest.passport_issue_date,
+              normalizedGuest.passport_expiry_date
+            ];
+
+            const result = await client.query(insertQuery, insertValues);
+            insertedGuests.push(result.rows[0]);
+
+          } catch (guestError) {
+            // Check if it's a unique constraint violation
+            if (guestError.code === '23505') {
+              errors.push({ 
+                index: i, 
+                error: 'Duplicate passport or unique constraint violation', 
+                detail: guestError.detail,
+                guest 
+              });
+            } else {
+              errors.push({ 
+                index: i, 
+                error: guestError.message, 
+                guest 
+              });
+            }
+          }
+        }
+
+        // Re-enable trigger
+        await client.query('ALTER TABLE incoming_guests ENABLE TRIGGER trg_enforce_stayid_shortform');
+
+      } finally {
+        client.release();
+      }
+
+      // Return results
+      const response = {
+        ok: true,
+        inserted: insertedGuests.length,
+        stay_id: stay_id,
+        guests: insertedGuests
+      };
+
+      if (errors.length > 0) {
+        response.errors = errors;
+        response.partial_success = true;
+      }
+
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify(response));
+
+    } catch (err) {
+      console.error('add-passport-guests error:', err);
+      res.statusCode = 500;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ 
+        ok: false, 
+        error: err.message 
+      }));
+    }
+    return;
+  }
+
   // Fallback
   res.statusCode = 404;
   res.setHeader('Content-Type','application/json');

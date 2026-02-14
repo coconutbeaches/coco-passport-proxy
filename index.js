@@ -1332,6 +1332,18 @@ const handler = async (req, res) => {
   if (req.method === 'POST' && url.pathname === '/coco-gpt-batch-passport') {
     console.log('🔴 OLD /coco-gpt-batch-passport endpoint called at', new Date().toISOString());
     console.log('⚠️  WARNING: This endpoint normalizes stay_id - should use /add-passport-guests instead');
+
+    // BLOCK COCOGPT FROM USING THIS ENDPOINT - FORCE IT TO USE THE NEW ONE
+    res.statusCode = 410;
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({
+      error: 'This endpoint is deprecated for CocoGPT',
+      message: 'Please use /add-passport-guests instead to preserve stay_id exactly',
+      new_endpoint: 'POST /add-passport-guests',
+      documentation: 'Update your OpenAPI schema to use /add-passport-guests with operationId: addPassportGuests'
+    }));
+    return;
+
     try {
       const body = await parseBody(req).catch(() => ({}));
       const { stay_id, passports, mrz_list } = body;

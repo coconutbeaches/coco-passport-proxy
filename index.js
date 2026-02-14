@@ -2194,8 +2194,9 @@ const handler = async (req, res) => {
       const errors = [];
 
       try {
-        // Disable trigger that enforces stay_id format
+        // Disable triggers that might interfere with passport guest insertion
         await client.query('ALTER TABLE incoming_guests DISABLE TRIGGER trg_enforce_stayid_shortform');
+        await client.query('ALTER TABLE incoming_guests DISABLE TRIGGER trg_set_default_guest_journey');
 
         // Process each guest
         for (let i = 0; i < guests.length; i++) {
@@ -2279,8 +2280,9 @@ const handler = async (req, res) => {
           }
         }
 
-        // Re-enable trigger
+        // Re-enable triggers
         await client.query('ALTER TABLE incoming_guests ENABLE TRIGGER trg_enforce_stayid_shortform');
+        await client.query('ALTER TABLE incoming_guests ENABLE TRIGGER trg_set_default_guest_journey');
 
       } finally {
         client.release();

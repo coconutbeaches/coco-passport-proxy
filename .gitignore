@@ -46,3 +46,4 @@ node_modules/
 npm-debug.log*
 yarn-*.log
 pnpm-debug.log*
+.env*.local

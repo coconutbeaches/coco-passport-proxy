@@ -1,0 +1,142 @@
+openapi: 3.1.0
+info:
+  title: Coconut Passport Proxy - CocoGPT Integration
+  version: 4.0.0
+  description: |
+    Simple passport guest insertion API for CocoGPT.
+    Extracts passport data from images and inserts into Supabase with exact stay_id preservation.
+
+servers:
+  - url: https://coco-passport-proxy.vercel.app
+    description: Production server
+
+security: []
+
+paths:
+  /add-passport-guests:
+    post:
+      operationId: insertPassportGuests
+      summary: Insert passport guest records with exact stay_id preservation
+      description: |
+        Insert passport guest records into the incoming_guests table.
+        - Creates separate guest rows (row_type='guest')
+        - Sets guest_journey='in_house'
+        - Preserves stay_id EXACTLY as provided (no normalization)
+        - Normalizes international characters in names only (ö→o, ü→u, é→e)
+
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - stay_id
+                - guests
+              properties:
+                stay_id:
+                  type: string
+                  description: Stay identifier - preserved EXACTLY as provided
+                  example: NH_Mantel
+                guests:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    required:
+                      - first_name
+                    properties:
+                      first_name:
+                        type: string
+                        example: John
+                      middle_name:
+                        type: string
+                        example: Robert
+                      last_name:
+                        type: string
+                        example: Smith
+                      gender:
+                        type: string
+                        enum: [M, F]
+                        example: M
+                      passport_number:
+                        type: string
+                        example: "123456789"
+                      nationality_alpha3:
+                        type: string
+                        example: USA
+                      issuing_country_alpha3:
+                        type: string
+                        example: USA
+                      birthday:
+                        type: string
+                        format: date
+                        example: "1990-01-15"
+                      passport_issue_date:
+                        type: string
+                        format: date
+                        example: "2020-01-01"
+                      passport_expiry_date:
+                        type: string
+                        format: date
+                        example: "2030-01-01"
+            examples:
+              minimal:
+                summary: Minimal example
+                value:
+                  stay_id: NH_Mantel
+                  guests:
+                    - first_name: John
+                      last_name: Smith
+                      passport_number: "123456789"
+
+              full:
+                summary: Full passport data
+                value:
+                  stay_id: NH_Mantel
+                  guests:
+                    - first_name: John
+                      middle_name: Robert
+                      last_name: Smith
+                      gender: M
+                      passport_number: "123456789"
+                      nationality_alpha3: USA
+                      issuing_country_alpha3: USA
+                      birthday: "1990-01-15"
+                      passport_issue_date: "2020-01-01"
+                      passport_expiry_date: "2030-01-01"
+
+      responses:
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  inserted:
+                    type: integer
+                    example: 2
+                  stay_id:
+                    type: string
+                    example: NH_Mantel
+                  guests:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        first_name:
+                          type: string
+                        last_name:
+                          type: string
+                        passport_number:
+                          type: string
+        "400":
+          description: Bad request
+        "500":
+          description: Server error

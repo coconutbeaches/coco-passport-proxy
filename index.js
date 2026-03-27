@@ -2212,9 +2212,25 @@ const handler = async (req, res) => {
       const errors = [];
 
       try {
-        // Disable triggers that might interfere with passport guest insertion
+        // Disable ALL six triggers before inserting. Disabling only some allows
+        // others (especially trg_set_default_guest_journey) to silently overwrite
+        // guest_journey to NULL, causing NOT NULL constraint violations.
         await client.query('ALTER TABLE incoming_guests DISABLE TRIGGER trg_enforce_stayid_shortform');
         await client.query('ALTER TABLE incoming_guests DISABLE TRIGGER trg_set_default_guest_journey');
+        await client.query('ALTER TABLE incoming_guests DISABLE TRIGGER trg_reconcile_tokeet_booking');
+        await client.query('ALTER TABLE incoming_guests DISABLE TRIGGER trg_autofill_incoming_guest_whatsapp_group');
+        await client.query('ALTER TABLE incoming_guests DISABLE TRIGGER normalize_stay_id_uppercase');
+        await client.query('ALTER TABLE incoming_guests DISABLE TRIGGER trg_generate_manual_booking_id');
+
+        // Look up the booking row to inherit property fields for each guest row
+        const bookingRes = await client.query(
+          `SELECT rental_unit, check_in_date, check_out_date, email, whatsapp_group_id, booking_status, adults, children
+           FROM incoming_guests
+           WHERE stay_id = $1 AND row_type = 'booking'
+           LIMIT 1`,
+          [stay_id.trim()]
+        );
+        const booking = bookingRes.rows[0] || {};
 
         // Process each guest
         for (let i = 0; i < guests.length; i++) {
@@ -2246,14 +2262,16 @@ const handler = async (req, res) => {
               row_type: 'guest' // Always 'guest' for passport entries
             };
 
-            // Insert guest row
+            // Insert guest row, inheriting booking fields from the parent booking row
             const insertQuery = `
               INSERT INTO incoming_guests (
                 stay_id, booking_id, source, row_type, phone_e164, guest_journey,
+                rental_unit, check_in_date, check_out_date, email, whatsapp_group_id,
+                booking_status, adults, children,
                 first_name, middle_name, last_name, gender,
                 passport_number, nationality_alpha3, issuing_country_alpha3,
                 birthday, passport_issue_date, passport_expiry_date
-              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
               RETURNING id, first_name, last_name, passport_number
             `;
 
@@ -2263,7 +2281,15 @@ const handler = async (req, res) => {
               normalizedGuest.source,
               normalizedGuest.row_type,
               normalizedGuest.phone_e164,
-              'in_house', // guest_journey - passports added while guests are in-house
+              'in_house',
+              booking.rental_unit || null,
+              booking.check_in_date || null,
+              booking.check_out_date || null,
+              booking.email || null,
+              booking.whatsapp_group_id || null,
+              booking.booking_status || null,
+              booking.adults || null,
+              booking.children || null,
               normalizedGuest.first_name,
               normalizedGuest.middle_name,
               normalizedGuest.last_name,
@@ -2298,9 +2324,19 @@ const handler = async (req, res) => {
           }
         }
 
-        // Re-enable triggers
+        // Re-enable all six triggers
         await client.query('ALTER TABLE incoming_guests ENABLE TRIGGER trg_enforce_stayid_shortform');
         await client.query('ALTER TABLE incoming_guests ENABLE TRIGGER trg_set_default_guest_journey');
+        await client.query('ALTER TABLE incoming_guests ENABLE TRIGGER trg_reconcile_tokeet_booking');
+        await client.query('ALTER TABLE incoming_guests ENABLE TRIGGER trg_autofill_incoming_guest_whatsapp_group');
+        await client.query('ALTER TABLE incoming_guests ENABLE TRIGGER normalize_stay_id_uppercase');
+        await client.query('ALTER TABLE incoming_guests ENABLE TRIGGER trg_generate_manual_booking_id');
+
+        // Set guest_journey='in_house' on the booking row as well
+        await client.query(
+          `UPDATE incoming_guests SET guest_journey = 'in_house' WHERE stay_id = $1`,
+          [stay_id.trim()]
+        );
 
       } finally {
         client.release();
